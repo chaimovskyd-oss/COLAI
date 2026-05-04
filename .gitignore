@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build folders
+dist/
+build/
+out/
+*.toc
+*.pyz
+
+# Node
+node_modules/
+
+# Cache / temp
+.cache/
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.stackdump
+.smart_collage_elements_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Large / binary artifacts
+*.zip
+*.7z
+*.rar
+*.exe
+*.msi
+*.pkg
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+
+# Runtime-generated user output
+edited_images/
+exports/
+output/
+*.colproj.autosave
+
+# Heavy downloaded/external model trees
+image.editor.engine/darktable-5.4.1/
+image.editor.engine/smart_image_editor/1/
+image.editor.engine/smart_image_editor/models/animegan2.onnx/
+image.editor.engine/smart_image_editor/models/1animegan.onnx
+image.editor.engine/smart_image_editor/models/animegan.onnx
+image.editor.engine/.pytest_cache/
+
+# Keep project/build configuration in Git
+!*.spec
+!*.iss
+!build_exe.bat
+!build_executable.bat
+!build_installer.bat

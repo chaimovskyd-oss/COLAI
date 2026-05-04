@@ -1,0 +1,347 @@
+﻿[
+  {
+    "id": "dark_photo",
+    "category": "Light",
+    "title": "Photo is too dark",
+    "problem": "The image lacks light and important subject details are hidden in shadows.",
+    "symptoms": ["The image looks dim", "Faces are not clear", "The histogram leans left"],
+    "recommended_steps": [
+      {"tool": "Exposure", "action": "Raise gently", "suggested_range": "+0.2 to +0.8"},
+      {"tool": "Shadows", "action": "Open dark areas", "suggested_range": "+10 to +40"},
+      {"tool": "Brightness", "action": "Use only if it is still dark", "suggested_range": "+5 to +20"},
+      {"tool": "Contrast", "action": "Add a little if the image becomes flat", "suggested_range": "+5 to +15"}
+    ],
+    "warnings": ["Do not burn bright areas", "Do not open shadows until the image looks gray"],
+    "future_auto_fix": {"enabled": true, "params": {"exposure": 0.35, "shadows": 25, "contrast": 8}}
+  },
+  {
+    "id": "too_bright",
+    "category": "Light",
+    "title": "Photo is too bright",
+    "problem": "Bright regions are too dominant and may lose detail.",
+    "symptoms": ["White areas have little detail", "Faces look washed out", "The histogram leans right"],
+    "recommended_steps": [
+      {"tool": "Exposure", "action": "Lower gently", "suggested_range": "-0.2 to -0.7"},
+      {"tool": "Highlights", "action": "Recover bright areas", "suggested_range": "-20 to -60"},
+      {"tool": "Whites", "action": "Lower if clipping remains", "suggested_range": "-5 to -25"},
+      {"tool": "Contrast", "action": "Add a little if needed", "suggested_range": "+3 to +12"}
+    ],
+    "warnings": ["Do not darken the whole image too much", "Protect skin and skies from grayness"],
+    "future_auto_fix": {"enabled": true, "params": {"exposure": -0.25, "highlights": -35, "whites": -12}}
+  },
+  {
+    "id": "flat_photo",
+    "category": "Light",
+    "title": "Flat photo / low depth",
+    "problem": "The image has weak separation between dark, midtone, and bright areas.",
+    "symptoms": ["No depth", "Everything looks gray or faded", "Edges feel weak"],
+    "recommended_steps": [
+      {"tool": "Contrast", "action": "Raise gently", "suggested_range": "+8 to +25"},
+      {"tool": "Blacks", "action": "Darken black point slightly", "suggested_range": "-5 to -20"},
+      {"tool": "Whites", "action": "Raise bright point slightly", "suggested_range": "+5 to +18"},
+      {"tool": "Clarity", "action": "Add local contrast carefully", "suggested_range": "+5 to +15"}
+    ],
+    "warnings": ["Do not crush blacks", "Avoid harsh skin texture"],
+    "future_auto_fix": {"enabled": true, "params": {"contrast": 16, "blacks": -8, "whites": 6, "clarity": 8}}
+  },
+  {
+    "id": "too_much_contrast",
+    "category": "Light",
+    "title": "Contrast is too strong",
+    "problem": "The image feels harsh, with blocked shadows or clipped highlights.",
+    "symptoms": ["Dark areas lose detail", "Highlights look hard", "Faces look too dramatic"],
+    "recommended_steps": [
+      {"tool": "Contrast", "action": "Reduce contrast", "suggested_range": "-10 to -35"},
+      {"tool": "Shadows", "action": "Open shadows", "suggested_range": "+8 to +28"},
+      {"tool": "Highlights", "action": "Reduce bright regions", "suggested_range": "-10 to -35"},
+      {"tool": "Blacks", "action": "Lift black point a little", "suggested_range": "+3 to +12"}
+    ],
+    "warnings": ["Do not make the image muddy", "Keep a clear black and white point"],
+    "future_auto_fix": {"enabled": true, "params": {"contrast": -18, "shadows": 18, "highlights": -18, "blacks": 8}}
+  },
+  {
+    "id": "red_photo",
+    "category": "Color",
+    "title": "Photo is too red",
+    "problem": "The image is too warm or skin tones are too red/orange.",
+    "symptoms": ["Skin looks red or orange", "The whole image feels too warm", "White objects look tinted"],
+    "recommended_steps": [
+      {"tool": "Temperature", "action": "Cool the image slightly", "suggested_range": "-5 to -20"},
+      {"tool": "Tint", "action": "Move slightly toward green", "suggested_range": "-2 to -10"},
+      {"tool": "Saturation", "action": "Reduce gently", "suggested_range": "-5 to -15"},
+      {"tool": "HSL Red/Orange", "action": "Reduce red/orange saturation", "suggested_range": "-5 to -25"}
+    ],
+    "warnings": ["Do not make skin pale or green", "Prefer HSL over global saturation for portraits"],
+    "future_auto_fix": {"enabled": true, "params": {"temperature": -12, "tint": -4, "saturation": -6, "hsl": {"red": {"saturation": -10}, "orange": {"saturation": -8}}}}
+  },
+  {
+    "id": "cold_blue_photo",
+    "category": "Color",
+    "title": "Photo is too blue or cold",
+    "problem": "The image feels cold and lacks natural warmth.",
+    "symptoms": ["Skin looks pale or blue", "Indoor light feels unnatural", "Whites look blue"],
+    "recommended_steps": [
+      {"tool": "Temperature", "action": "Warm the image", "suggested_range": "+5 to +25"},
+      {"tool": "Tint", "action": "Add a small magenta correction if needed", "suggested_range": "+1 to +8"},
+      {"tool": "Vibrance", "action": "Recover weak colors gently", "suggested_range": "+5 to +18"}
+    ],
+    "warnings": ["Do not over-warm whites", "Check skin tones after temperature changes"],
+    "future_auto_fix": {"enabled": true, "params": {"temperature": 14, "tint": 3, "vibrance": 10}}
+  },
+  {
+    "id": "weak_colors",
+    "category": "Color",
+    "title": "Colors are weak or faded",
+    "problem": "The photo lacks color energy.",
+    "symptoms": ["Colors look faded", "The image feels lifeless", "Print output may look dull"],
+    "recommended_steps": [
+      {"tool": "Vibrance", "action": "Raise first", "suggested_range": "+10 to +30"},
+      {"tool": "Saturation", "action": "Add a little", "suggested_range": "+4 to +14"},
+      {"tool": "Contrast", "action": "Add subtle depth", "suggested_range": "+4 to +12"}
+    ],
+    "warnings": ["Do not push skin into orange", "Prefer vibrance before saturation"],
+    "future_auto_fix": {"enabled": true, "params": {"vibrance": 22, "saturation": 7, "contrast": 6}}
+  },
+  {
+    "id": "oversaturated_colors",
+    "category": "Color",
+    "title": "Colors are too strong",
+    "problem": "Colors look unnatural or neon.",
+    "symptoms": ["Grass or clothes look neon", "Skin looks orange", "Print may become too saturated"],
+    "recommended_steps": [
+      {"tool": "Saturation", "action": "Lower globally", "suggested_range": "-8 to -25"},
+      {"tool": "Vibrance", "action": "Lower if weak colors also look too strong", "suggested_range": "-5 to -18"},
+      {"tool": "HSL", "action": "Reduce only the problem color", "suggested_range": "-8 to -30"}
+    ],
+    "warnings": ["Do not remove all color life", "Use HSL for one problematic color"],
+    "future_auto_fix": {"enabled": true, "params": {"saturation": -14, "vibrance": -6}}
+  },
+  {
+    "id": "dark_faces",
+    "category": "Faces",
+    "title": "Faces are too dark",
+    "problem": "People are underexposed compared with the rest of the image.",
+    "symptoms": ["Eyes are not clear", "Faces disappear in shadows", "Background is brighter than subject"],
+    "recommended_steps": [
+      {"tool": "Shadows", "action": "Open dark face areas", "suggested_range": "+12 to +35"},
+      {"tool": "Exposure", "action": "Raise slightly", "suggested_range": "+0.1 to +0.35"},
+      {"tool": "Face Brighten", "action": "Use when available", "suggested_range": "automatic"}
+    ],
+    "warnings": ["Do not brighten until skin loses shape", "Watch highlight clipping on forehead and cheeks"],
+    "future_auto_fix": {"enabled": true, "params": {"shadows": 24, "exposure": 0.16, "highlights": -8}}
+  },
+  {
+    "id": "red_skin",
+    "category": "Faces",
+    "title": "Skin is too red",
+    "problem": "Skin tones are red/orange and need a softer correction.",
+    "symptoms": ["Cheeks look too red", "Skin prints too warm", "The whole face feels orange"],
+    "recommended_steps": [
+      {"tool": "Reduce Red Skin", "action": "Use print/skin correction", "suggested_range": "+8 to +25"},
+      {"tool": "HSL Orange", "action": "Lower orange saturation", "suggested_range": "-5 to -20"},
+      {"tool": "HSL Red", "action": "Lower red saturation", "suggested_range": "-5 to -20"},
+      {"tool": "Temperature", "action": "Cool a little", "suggested_range": "-3 to -10"}
+    ],
+    "warnings": ["Do not make skin gray", "Avoid green tint"],
+    "future_auto_fix": {"enabled": true, "params": {"print_reduce_red_skin": 16, "temperature": -5, "hsl": {"red": {"saturation": -12}, "orange": {"saturation": -10}}}}
+  },
+  {
+    "id": "soft_faces",
+    "category": "Faces",
+    "title": "Faces are soft or blurry",
+    "problem": "Facial details lack crispness.",
+    "symptoms": ["Eyes are not crisp", "Hair and face edges look soft", "The image may be slightly out of focus"],
+    "recommended_steps": [
+      {"tool": "Sharpen", "action": "Raise gently", "suggested_range": "+8 to +25"},
+      {"tool": "Texture", "action": "Add a little", "suggested_range": "+4 to +12"},
+      {"tool": "Clarity", "action": "Use carefully", "suggested_range": "+3 to +10"},
+      {"tool": "Face Restore", "action": "Restore facial detail when needed", "suggested_range": "+40 to +80"}
+    ],
+    "warnings": ["Do not create halos around faces", "Avoid harsh skin texture"],
+    "future_auto_fix": {"enabled": true, "params": {"ai_face_restore": 60, "sharpness": 8, "texture": 4}}
+  },
+  {
+    "id": "soft_photo",
+    "category": "Detail",
+    "title": "Photo is too soft",
+    "problem": "Overall detail lacks crispness.",
+    "symptoms": ["Edges feel weak", "Small details are unclear", "Image looks slightly unfocused"],
+    "recommended_steps": [
+      {"tool": "Sharpen", "action": "Raise", "suggested_range": "+10 to +35"},
+      {"tool": "Texture", "action": "Add detail", "suggested_range": "+5 to +18"},
+      {"tool": "Clarity", "action": "Add local contrast gently", "suggested_range": "+4 to +14"}
+    ],
+    "warnings": ["Do not oversharpen for print", "Watch for bright edge halos"],
+    "future_auto_fix": {"enabled": true, "params": {"sharpness": 20, "texture": 10, "clarity": 6}}
+  },
+  {
+    "id": "noisy_photo",
+    "category": "Detail",
+    "title": "Photo is noisy or grainy",
+    "problem": "Noise is visible, usually in shadows or high ISO photos.",
+    "symptoms": ["Colored speckles", "Rough shadows", "Skin looks dirty"],
+    "recommended_steps": [
+      {"tool": "Noise Reduction", "action": "Raise luminance reduction", "suggested_range": "+10 to +35"},
+      {"tool": "Color Noise Reduction", "action": "Remove colored speckles", "suggested_range": "+10 to +40"},
+      {"tool": "Sharpen", "action": "Lower a little if halos appear", "suggested_range": "-5 to -15"}
+    ],
+    "warnings": ["Do not smooth away real detail", "Use less sharpening after denoise"],
+    "future_auto_fix": {"enabled": true, "params": {"noise_reduction": 22, "color_noise_reduction": 25, "sharpness": 4}}
+  },
+  {
+    "id": "too_small_for_print",
+    "category": "Detail",
+    "title": "Photo is too small for print",
+    "problem": "The image resolution may be too low for high-quality print.",
+    "symptoms": ["Small pixel dimensions", "Image looks blocky when zoomed", "Print size is large"],
+    "recommended_steps": [
+      {"tool": "Upscale", "action": "Use AI upscaling", "suggested_range": "2x to 4x"},
+      {"tool": "Sharpness", "action": "Use only after upscale", "suggested_range": "+5 to +15"}
+    ],
+    "warnings": ["Do not rely on sharpening as an upscale replacement", "Warn before large prints"],
+    "future_auto_fix": {"enabled": true, "params": {"ai_upscale_factor": 2, "ai_upscale_strength": 100, "sharpness": 8}}
+  },
+  {
+    "id": "off_center_photo",
+    "category": "Composition",
+    "title": "Subject is not centered",
+    "problem": "The important subject placement feels accidental.",
+    "symptoms": ["Too much empty space", "Subject touches an edge", "Image feels unbalanced"],
+    "recommended_steps": [
+      {"tool": "Crop", "action": "Reframe subject", "suggested_range": "free or original ratio"},
+      {"tool": "Grid Overlay", "action": "Use rule of thirds", "suggested_range": "enabled"}
+    ],
+    "warnings": ["Do not crop important body parts", "Keep enough bleed for print"],
+    "future_auto_fix": {"enabled": false, "params": {}}
+  },
+  {
+    "id": "crooked_photo",
+    "category": "Composition",
+    "title": "Photo is crooked",
+    "problem": "The horizon or vertical lines are tilted.",
+    "symptoms": ["Horizon is slanted", "Buildings lean", "Frame feels unstable"],
+    "recommended_steps": [
+      {"tool": "Straighten", "action": "Rotate fine adjustment", "suggested_range": "-5 to +5 degrees"},
+      {"tool": "Rotate", "action": "Use 90 degree rotate only if orientation is wrong", "suggested_range": "90/180/270"}
+    ],
+    "warnings": ["Straightening crops edges", "Check faces and product edges after rotation"],
+    "future_auto_fix": {"enabled": false, "params": {}}
+  },
+  {
+    "id": "subject_focus",
+    "category": "Effects",
+    "title": "Emphasize the subject",
+    "problem": "The subject needs more attention than the background.",
+    "symptoms": ["Background competes with subject", "Eye does not know where to look", "Product needs focus"],
+    "recommended_steps": [
+      {"tool": "Vignette", "action": "Darken edges gently", "suggested_range": "-8 to -25"},
+      {"tool": "Contrast", "action": "Add mild separation", "suggested_range": "+4 to +12"},
+      {"tool": "Background Blur", "action": "Use when segmentation is available", "suggested_range": "automatic"}
+    ],
+    "warnings": ["Do not make corners visibly black", "Keep product colors accurate"],
+    "future_auto_fix": {"enabled": true, "params": {"vignette_amount": -16, "contrast": 6}}
+  },
+  {
+    "id": "depth_bokeh",
+    "category": "Effects",
+    "title": "Add depth / bokeh feel",
+    "problem": "The image would benefit from stronger subject-background separation.",
+    "symptoms": ["Everything has the same sharpness", "Background distracts", "Portrait feels flat"],
+    "recommended_steps": [
+      {"tool": "Radial Blur", "action": "Use very gently", "suggested_range": "+5 to +18"},
+      {"tool": "Lens Blur (future)", "action": "Use subject mask when available", "suggested_range": "automatic"},
+      {"tool": "Background Blur", "action": "Blur background only", "suggested_range": "automatic"}
+    ],
+    "warnings": ["Avoid blurring the subject", "Radial blur is only a temporary approximation"],
+    "future_auto_fix": {"enabled": true, "params": {"radial_blur": 10}}
+  },
+  {
+    "id": "cinematic_look",
+    "category": "Effects",
+    "title": "Cinematic / professional look",
+    "problem": "The image needs a stylized, polished finish.",
+    "symptoms": ["Photo feels too plain", "Needs mood", "Could use a subtle grade"],
+    "recommended_steps": [
+      {"tool": "Preset", "action": "Start with Vintage Soft or Black & White Classic", "suggested_range": "20% to 70% intensity"},
+      {"tool": "Vignette", "action": "Add subtle edge focus", "suggested_range": "-8 to -20"},
+      {"tool": "Temperature", "action": "Tune mood", "suggested_range": "-10 to +10"},
+      {"tool": "Contrast", "action": "Add shape", "suggested_range": "+5 to +18"}
+    ],
+    "warnings": ["Do not over-style family or product photos", "Keep skin tones believable"],
+    "future_auto_fix": {"enabled": true, "params": {"contrast": 10, "temperature": 4, "vignette_amount": -12, "grain_amount": 6}}
+  },
+  {
+    "id": "print_dark",
+    "category": "Print",
+    "title": "Print comes out too dark",
+    "problem": "The screen preview looks fine but printed output loses shadow detail.",
+    "symptoms": ["Shadows print too dense", "Faces print darker than expected", "Canvas output looks heavy"],
+    "recommended_steps": [
+      {"tool": "Exposure", "action": "Raise slightly", "suggested_range": "+0.1 to +0.3"},
+      {"tool": "Shadows", "action": "Open shadows", "suggested_range": "+10 to +25"},
+      {"tool": "Saturation", "action": "Raise a little if print looks faded", "suggested_range": "+4 to +12"},
+      {"tool": "Print Mode", "action": "Use General Print Safe", "suggested_range": "enabled"}
+    ],
+    "warnings": ["Do not rely only on monitor brightness", "Use a print preset for the material"],
+    "future_auto_fix": {"enabled": true, "params": {"print_mode": "General Print Safe", "exposure": 0.18, "shadows": 18, "saturation": 6}}
+  },
+  {
+    "id": "print_red_skin",
+    "category": "Print",
+    "title": "Skin prints too red",
+    "problem": "Printed skin tones become too warm or red.",
+    "symptoms": ["Cheeks print red", "Family photos look too warm", "Orange/red channels dominate"],
+    "recommended_steps": [
+      {"tool": "Reduce Red Skin", "action": "Raise correction", "suggested_range": "+8 to +25"},
+      {"tool": "HSL Orange/Red", "action": "Reduce saturation", "suggested_range": "-5 to -20"},
+      {"tool": "Temperature", "action": "Cool a little", "suggested_range": "-3 to -10"}
+    ],
+    "warnings": ["Do not make skin gray", "Use test print for recurring jobs"],
+    "future_auto_fix": {"enabled": true, "params": {"print_reduce_red_skin": 18, "temperature": -5, "hsl": {"red": {"saturation": -10}, "orange": {"saturation": -10}}}}
+  },
+  {
+    "id": "print_weak_colors",
+    "category": "Print",
+    "title": "Colors print too weak",
+    "problem": "Printed output looks less vivid than screen preview.",
+    "symptoms": ["Print looks faded", "Product colors lack impact", "Canvas or matte output is muted"],
+    "recommended_steps": [
+      {"tool": "Saturation", "action": "Raise gently", "suggested_range": "+4 to +14"},
+      {"tool": "Contrast", "action": "Raise slightly", "suggested_range": "+4 to +12"},
+      {"tool": "Print Mode", "action": "Use material-specific boost", "suggested_range": "Canvas/Matte/Sublimation"}
+    ],
+    "warnings": ["Avoid neon colors", "Different materials need different compensation"],
+    "future_auto_fix": {"enabled": true, "params": {"saturation": 8, "contrast": 6, "print_mode": "General Print Safe"}}
+  },
+  {
+    "id": "canvas_prep",
+    "category": "Print",
+    "title": "Prepare for canvas",
+    "problem": "Canvas needs softer contrast, protected highlights, and enough shadow lift.",
+    "symptoms": ["Canvas prints dense", "Texture hides shadow detail", "Highlights can lose subtle detail"],
+    "recommended_steps": [
+      {"tool": "Print Mode", "action": "Use Canvas Print Boost", "suggested_range": "enabled"},
+      {"tool": "Contrast", "action": "Keep soft", "suggested_range": "-5 to +6"},
+      {"tool": "Protect Highlights", "action": "Raise", "suggested_range": "+8 to +25"},
+      {"tool": "Print Sharpness", "action": "Use gently", "suggested_range": "+4 to +12"}
+    ],
+    "warnings": ["Do not oversharpen canvas", "Leave room for wrap/bleed"],
+    "future_auto_fix": {"enabled": true, "params": {"print_mode": "Canvas Print Boost", "print_protect_highlights": 14, "print_safe_sharpness": 6}}
+  },
+  {
+    "id": "sublimation_prep",
+    "category": "Print",
+    "title": "Prepare for sublimation",
+    "problem": "Sublimation often needs stronger color and a mirror-output warning.",
+    "symptoms": ["Transfer looks weak", "Colors need compensation", "Design may need mirroring"],
+    "recommended_steps": [
+      {"tool": "Print Mode", "action": "Use Sublimation Boost", "suggested_range": "enabled"},
+      {"tool": "Saturation", "action": "Raise carefully", "suggested_range": "+8 to +18"},
+      {"tool": "Brightness", "action": "Compensate if needed", "suggested_range": "+4 to +12"},
+      {"tool": "Mirror Warning", "action": "Remember to mirror in print workflow", "suggested_range": "manual check"}
+    ],
+    "warnings": ["Do not oversaturate skin", "Mirror warning is informational in this version"],
+    "future_auto_fix": {"enabled": true, "params": {"print_mode": "Sublimation Boost", "saturation": 10, "brightness": 6}}
+  }
+]
+

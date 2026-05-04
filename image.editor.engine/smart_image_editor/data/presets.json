@@ -1,0 +1,17 @@
+[
+  {"name": "Auto Clean", "category": "Basic", "params": {"exposure": 0.12, "contrast": 8, "vibrance": 12, "sharpness": 8}},
+  {"name": "Portrait Soft", "category": "Portrait", "params": {"exposure": 0.1, "contrast": -4, "shadows": 10, "vibrance": 8, "sharpness": 4, "vignette_amount": -10}},
+  {"name": "Family Photo Clean", "category": "Portrait", "params": {"exposure": 0.14, "shadows": 14, "highlights": -8, "vibrance": 10, "print_reduce_red_skin": 8, "sharpness": 6}},
+  {"name": "Product Bright", "category": "Product", "params": {"exposure": 0.22, "brightness": 6, "contrast": 8, "saturation": 6, "sharpness": 12}},
+  {"name": "Phone Photo Fix", "category": "Fix", "params": {"exposure": 0.12, "shadows": 16, "highlights": -12, "vibrance": 14, "clarity": 8, "sharpness": 8}},
+  {"name": "Underexposed Fix", "category": "Fix", "params": {"exposure": 0.35, "shadows": 28, "contrast": -4, "noise_reduction": 10}},
+  {"name": "Black & White Classic", "category": "Creative", "params": {"black_white": true, "contrast": 18, "highlights": -8, "blacks": -8, "grain_amount": 8}},
+  {"name": "Vintage Soft", "category": "Creative", "params": {"temperature": 12, "contrast": -10, "saturation": -8, "vignette_amount": -18, "grain_amount": 12}},
+  {"name": "Canvas Soft Boost", "category": "Print", "params": {"exposure": 0.15, "shadows": 15, "contrast": 5, "saturation": 8, "sharpness": 6}},
+  {"name": "Sublimation Strong", "category": "Print", "params": {"exposure": 0.18, "contrast": 10, "saturation": 14, "vibrance": 10, "sharpness": 8}},
+  {"name": "Photo Paper Glossy", "category": "Print", "params": {"print_mode": "Glossy Photo Paper", "exposure": 0.1, "sharpness": 8}},
+  {"name": "Matte Paper Soft", "category": "Print", "params": {"print_mode": "Matte Photo Paper", "shadows": 8, "contrast": -3, "saturation": 5}},
+  {"name": "Skin Tone Safe", "category": "Portrait", "params": {"vibrance": 8, "saturation": -4, "print_reduce_red_skin": 12, "highlights": -8}},
+  {"name": "Old Photo Restore Basic", "category": "Restore", "params": {"brightness": 8, "contrast": 12, "shadows": 18, "noise_reduction": 15, "sharpness": 6}},
+  {"name": "Warm Indoor Fix", "category": "Fix", "params": {"temperature": -10, "tint": -3, "exposure": 0.12, "shadows": 12}}
+]

@@ -1,0 +1,173 @@
+================================================================================
+SMART COLLAGE MAKER - QUICK START BUILD GUIDE
+================================================================================
+
+You now have everything you need to create a professional standalone installer.
+
+================================================================================
+WHAT YOU HAVE
+================================================================================
+
+✓ smart_collage_maker.spec
+  - PyInstaller configuration file
+  - Defines how to build the standalone executable
+
+✓ SmartCollageMaker.iss
+  - Inno Setup configuration file
+  - Defines how to create the Windows installer
+
+✓ build_installer.bat  [<-- RUN THIS FILE]
+  - One-click script that builds everything
+  - Checks dependencies, builds executable, creates installer
+  - Duration: 5-15 minutes (depending on your computer)
+
+✓ build_executable.bat
+  - Alternative: builds just the executable (faster, no installer)
+
+✓ SETUP_README.md
+  - Comprehensive guide (detailed information)
+
+✓ INSTALLATION_GUIDE.md
+  - Step-by-step manual instructions
+
+================================================================================
+QUICK START (5 STEPS)
+================================================================================
+
+Step 1: Install PyInstaller (one time only)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Open Command Prompt and run:
+
+    pip install pyinstaller
+
+Step 2: Download & Install Inno Setup (one time only)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Go to: https://jrsoftware.org/isinfo.php
+Download and install with default settings.
+
+Step 3: Run the Build Script
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Open Command Prompt in this folder and run:
+
+    build_installer.bat
+
+Wait 5-15 minutes for the build to complete.
+
+Step 4: Find Your Installer
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The installer will be created at:
+
+    dist/SmartCollageMaker_Setup.exe
+
+Step 5: Distribute to Users
+━━━━━━━━━━━━━━━━━━━━━━━━━
+Users can now install the application by running:
+
+    SmartCollageMaker_Setup.exe
+
+No Python, no pip, no dependencies needed on the user's machine!
+
+================================================================================
+RESULT
+================================================================================
+
+After build completes, you will have:
+
+  dist/SmartCollageMaker_Setup.exe          (~200-300 MB)
+  └─ Complete standalone installer
+     └─ Includes: application, all libraries, translations, etc.
+
+To distribute:
+  • Upload SmartCollageMaker_Setup.exe to your website/server
+  • Send to users
+  • Users run the installer
+  • Application is ready to use!
+
+================================================================================
+WHAT'S INCLUDED IN THE INSTALLER
+================================================================================
+
+✓ Smart Collage Maker application (main .exe file)
+✓ PySide6 (Qt GUI framework)
+✓ Pillow (image processing)
+✓ MediaPipe (face detection)
+✓ NumPy (numerical computing)
+✓ All application data files
+✓ All translations (English & Hebrew)
+✓ All assets and resources
+✓ Start Menu shortcuts
+✓ Desktop shortcut (optional during install)
+✓ Uninstall support
+
+NO ADDITIONAL SOFTWARE REQUIRED!
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Problem: Command not found: "pip"
+Solution: Make sure Python is in your PATH
+  - Reinstall Python from python.org
+  - Check "Add Python to PATH" during installation
+
+Problem: Build takes a very long time
+Solution: This is normal! MediaPipe is large (~100+ MB)
+  - Total build time: 10-15 minutes
+  - Just wait, don't interrupt
+
+Problem: "Inno Setup not found"
+Solution: Download and install from https://jrsoftware.org/isinfo.php
+
+Problem: SmartCollageMaker.exe shows security warning on install
+Solution: This is normal for unsigned executables
+  - Users can click "More info" → "Run anyway"
+  - To remove warning, digitally sign the executable
+
+================================================================================
+ALTERNATIVE: BUILD JUST THE EXECUTABLE (FASTER)
+================================================================================
+
+If you don't want to create an installer and just need the standalone folder:
+
+    build_executable.bat
+
+This will create:
+    dist/SmartCollageMaker/   (~200-300 MB folder)
+
+You can:
+  • Copy the folder to any location
+  • Zip it and distribute to users
+  • Users just run SmartCollageMaker.exe
+
+No installation needed, but no uninstall either.
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Read SETUP_README.md for detailed information
+2. Read INSTALLATION_GUIDE.md for step-by-step instructions
+3. Run: build_installer.bat
+4. Distribute the resulting .exe file to users
+5. Users install and enjoy!
+
+================================================================================
+SUPPORT
+================================================================================
+
+For detailed information, see:
+  • SETUP_README.md - Comprehensive guide
+  • INSTALLATION_GUIDE.md - Detailed step-by-step instructions
+
+For issues with:
+  • PyInstaller: https://github.com/pyinstaller/pyinstaller
+  • Inno Setup: https://jrsoftware.org/
+  • Smart Collage Maker: See README.md
+
+================================================================================
+That's it! Ready to build?
+
+    build_installer.bat
+
+Go! 🚀
+================================================================================

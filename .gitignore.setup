@@ -1,0 +1,86 @@
+# ============================================================================
+# Smart Collage Maker - Build Artifacts (.gitignore additions)
+# ============================================================================
+#
+# Add these lines to your .gitignore to avoid committing build artifacts.
+# Copy this file's contents to your .gitignore file.
+
+# PyInstaller Build Artifacts
+build/
+dist/
+*.build/
+*.dist/
+*.spec.bak
+
+# Inno Setup Build
+SmartCollageMaker_Setup.exe
+*.exe
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE and Editor
+.vscode/
+.idea/
+.sublime-project
+.sublime-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment Variables
+.env
+.env.local
+*.env.local
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Temporary Files
+*.tmp
+*.temp
+*.log
+*.bak
+*.backup
+
+# Virtual Environments
+venv/
+env/
+ENV/
+
+# Test Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Distribution
+dist/
+build/
+
+# ============================================================================
+# END OF SETUP BUILD GITIGNORE
+# ============================================================================
