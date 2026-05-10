@@ -38,7 +38,10 @@ except Exception as exc:  # pragma: no cover
 
 
 _YOLO_MODEL = None
-_YOLO_MODEL_NAME = 'yolo11n.pt'
+_YOLO_MODEL_NAME = 'yolov8m.pt'
+
+# In-memory detection cache: cache_key → {faces, persons, scene, depth_map}
+_DETECTION_CACHE: dict = {}
 _ANALYSIS_MAX_DIM = 960
 _FACE_PAD = 0.35
 _PERSON_PAD_X = 0.10
@@ -111,7 +114,11 @@ def _image_cache_key(path: str, rotation: int) -> str:
 
 
 def mediapipe_available() -> bool:
-    return face_detector.mediapipe_available()
+    return False
+
+
+def insightface_available() -> bool:
+    return face_detector.insightface_available()
 
 
 def retinaface_available() -> bool:
@@ -153,7 +160,7 @@ def _detect_people(img: Image.Image) -> List[PersonDetectionData]:
         return []
     try:
         arr = np.array(img)
-        result = model.predict(arr, verbose=False, classes=[0], conf=0.25)[0]
+        result = model.predict(arr, verbose=False, classes=[0], conf=0.45, iou=0.45, max_det=20)[0]
     except Exception:
         return []
 
@@ -268,40 +275,129 @@ def _build_safe_regions(faces: List[FaceDetectionData], persons: List[PersonDete
     )
 
 
+def classify_scene(
+    faces: List[FaceDetectionData],
+    persons: List[PersonDetectionData],
+) -> dict:
+    """Classify a scene based on main subjects only (background faces excluded).
+
+    Returns:
+        scene_type: 'no_face' | 'single_face' | 'group_small' | 'group_large'
+        main_faces: faces classified as main subjects
+        background_faces: faces classified as background
+        persons: YOLOv8 person detections passed through unchanged
+        scene_score: confidence of classification [0..1]
+    """
+    if not faces:
+        return {
+            'scene_type': 'no_face',
+            'main_faces': [],
+            'background_faces': [],
+            'persons': persons,
+            'scene_score': 1.0,
+        }
+
+    max_w = max(f.bbox.width for f in faces)
+    main: List[FaceDetectionData] = []
+    background: List[FaceDetectionData] = []
+
+    for face in faces:
+        size_score = face.bbox.width / max_w if max_w > 0 else 0.0
+        if size_score >= 0.5:
+            main.append(face)
+        else:
+            # Use position as tiebreaker when size scores are very close
+            dist = (
+                abs(face.bbox.cx - 0.5) ** 2 + abs(face.bbox.cy - 0.5) ** 2
+            ) ** 0.5
+            combined = size_score * 0.7 - dist * 0.3
+            if combined >= 0.35:
+                main.append(face)
+            else:
+                background.append(face)
+
+    n = len(main)
+    if n == 0:
+        scene_type = 'no_face'
+        scene_score = 1.0
+    elif n == 1:
+        scene_type = 'single_face'
+        scene_score = float(main[0].confidence)
+    elif n <= 4:
+        scene_type = 'group_small'
+        scene_score = float(sum(f.confidence for f in main) / n)
+    else:
+        scene_type = 'group_large'
+        scene_score = float(sum(f.confidence for f in main) / n)
+
+    return {
+        'scene_type': scene_type,
+        'main_faces': main,
+        'background_faces': background,
+        'persons': persons,
+        'scene_score': min(1.0, max(0.0, scene_score)),
+    }
+
+
+def invalidate_detection_cache(path: Optional[str] = None) -> None:
+    """Clear detection cache for a specific path or entirely."""
+    if path is None:
+        _DETECTION_CACHE.clear()
+    else:
+        keys_to_drop = [k for k in _DETECTION_CACHE if _DETECTION_CACHE[k].get('_path') == path]
+        for k in keys_to_drop:
+            del _DETECTION_CACHE[k]
+
+
 def analyze_image(
     path: str,
     rotation: int = 0,
     face_backend: str = 'auto',
 ) -> ImageAnalysis:
-    preview = _preview_image(path, rotation=rotation)
-    persons = _detect_people(preview)
-    if not persons:
-        persons = _detect_people_fallback(preview)
-    person_boxes = [
-        (p.bbox.left, p.bbox.top, p.bbox.right, p.bbox.bottom)
-        for p in persons
-    ]
-    use_retina = face_backend in {'auto', 'retinaface'}
-    if face_backend == 'mediapipe':
-        rich_faces = face_detector.detect_faces_with_fallback_from_image(preview, person_boxes=person_boxes)
+    cache_key = _image_cache_key(path, rotation)
+
+    # Return cached detection results when the same image is re-requested
+    cached = _DETECTION_CACHE.get(cache_key)
+    if cached is not None:
+        faces = cached['faces']
+        persons = cached['persons']
     else:
+        preview = _preview_image(path, rotation=rotation)
+        persons = _detect_people(preview)
+        if not persons:
+            persons = _detect_people_fallback(preview)
+        person_boxes = [
+            (p.bbox.left, p.bbox.top, p.bbox.right, p.bbox.bottom)
+            for p in persons
+        ]
+        use_retina = face_backend in {'auto', 'retinaface'}
         rich_faces = face_detector.detect_faces_advanced_from_image(
             preview,
             prefer_retina=use_retina,
             person_boxes=person_boxes,
         )
-    faces = [
-        FaceDetectionData(
-            bbox=_make_box(det.left, det.top, det.right, det.bottom),
-            confidence=float(det.confidence),
-            area_ratio=float(det.area),
-            center=(float(det.cx), float(det.cy)),
-            keypoints=dict(det.keypoints),
-        )
-        for det in rich_faces
-    ]
+        faces = [
+            FaceDetectionData(
+                bbox=_make_box(det.left, det.top, det.right, det.bottom),
+                confidence=float(det.confidence),
+                area_ratio=float(det.area),
+                center=(float(det.cx), float(det.cy)),
+                keypoints=dict(det.keypoints),
+            )
+            for det in rich_faces
+        ]
+        scene = classify_scene(faces, persons)
+        _DETECTION_CACHE[cache_key] = {
+            '_path': path,
+            'faces': faces,
+            'persons': persons,
+            'scene': scene,
+            'depth_map': None,
+        }
+
     image_type, crop_tolerance = _characterize_image(faces, persons)
     safe_regions = _build_safe_regions(faces, persons)
+    preview = _preview_image(path, rotation=rotation)
     return ImageAnalysis(
         image_id=os.path.basename(path),
         source_path=path,
@@ -313,16 +409,16 @@ def analyze_image(
         crop_tolerance=crop_tolerance,
         safe_regions=safe_regions,
         analyzed_at=_utc_now(),
-        cache_key=_image_cache_key(path, rotation),
+        cache_key=cache_key,
         detector_versions={
-            'mediapipe': 'enabled' if mediapipe_available() else 'missing',
+            'insightface': 'enabled' if insightface_available() else 'missing',
             'retinaface': 'enabled' if retinaface_available() else 'missing',
-            'yolo11': _YOLO_MODEL_NAME if yolo_available() else 'missing',
+            'yolo': _YOLO_MODEL_NAME if yolo_available() else 'missing',
             'face_backend': face_backend,
         },
         future_hooks={
             'pose_supported': bool(yolo_available()),
-            'face_landmarks_supported': bool(mediapipe_available() or retinaface_available()),
+            'face_landmarks_supported': bool(insightface_available() or retinaface_available()),
             'segmentation_supported': False,
             'saliency_supported': False,
         },

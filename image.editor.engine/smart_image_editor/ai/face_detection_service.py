@@ -9,9 +9,11 @@ from PIL import Image
 
 
 try:
-    import mediapipe as mp
-except Exception:  # pragma: no cover - optional runtime dependency
-    mp = None
+    from insightface.app import FaceAnalysis as _FaceAnalysis
+    _INSIGHTFACE_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional runtime dependency
+    _FaceAnalysis = None
+    _INSIGHTFACE_AVAILABLE = False
 
 
 @dataclass(frozen=True)
@@ -28,10 +30,22 @@ class FaceBox:
 
 @lru_cache(maxsize=1)
 def _face_detector():
-    if mp is None or not hasattr(mp, "solutions") or not hasattr(mp.solutions, "face_detection"):
+    if not _INSIGHTFACE_AVAILABLE:
         return None
     try:
-        return mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.45)
+        try:
+            import onnxruntime as _ort
+            providers = (
+                ['CUDAExecutionProvider']
+                if 'CUDAExecutionProvider' in _ort.get_available_providers()
+                else ['CPUExecutionProvider']
+            )
+        except Exception:
+            providers = ['CPUExecutionProvider']
+        ctx_id = 0 if providers[0] == 'CUDAExecutionProvider' else -1
+        app = _FaceAnalysis(name='buffalo_l', root='./models', providers=providers)
+        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        return app
     except Exception:
         return None
 
@@ -46,19 +60,33 @@ def _haar_detector():
 def detect_faces(image: Image.Image) -> list[FaceBox]:
     rgb = np.asarray(image.convert("RGB"))
     height, width = rgb.shape[:2]
-    detector = _face_detector()
-    if detector is not None:
-        result = detector.process(rgb)
-        faces: list[FaceBox] = []
-        for detection in result.detections or []:
-            box = detection.location_data.relative_bounding_box
-            x = max(0, int(box.xmin * width))
-            y = max(0, int(box.ymin * height))
-            w = min(width - x, int(box.width * width))
-            h = min(height - y, int(box.height * height))
-            faces.append(FaceBox(x=x, y=y, width=w, height=h, score=float(detection.score[0])))
-        return faces
+    image_area = max(1, width * height)
 
+    app = _face_detector()
+    if app is not None:
+        try:
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            raw = app.get(bgr)
+            faces: list[FaceBox] = []
+            for face in raw:
+                score = float(face.det_score)
+                if score < 0.6:
+                    continue
+                x1, y1, x2, y2 = (float(v) for v in face.bbox)
+                face_area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                if face_area / image_area < 0.02:
+                    continue
+                x = max(0, int(x1))
+                y = max(0, int(y1))
+                w = min(width - x, int(x2 - x1))
+                h = min(height - y, int(y2 - y1))
+                if w > 0 and h > 0:
+                    faces.append(FaceBox(x=x, y=y, width=w, height=h, score=score))
+            return faces
+        except Exception:
+            pass
+
+    # Haar cascade fallback
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     haar = _haar_detector()
     if haar is None:
@@ -87,4 +115,5 @@ def face_mask(image: Image.Image, padding: float = 0.35) -> np.ndarray:
 
 
 def has_mediapipe_face_detection() -> bool:
+    """Kept for backward compatibility — returns True when InsightFace is available."""
     return _face_detector() is not None

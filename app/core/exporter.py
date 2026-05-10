@@ -59,6 +59,33 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
         target_spacing = float(getattr(settings, 'soft_fade_spacing_override_px', base_spacing))
         spacing_inset = (target_spacing - base_spacing) / 2.0
 
+    # Pre-compute depth maps for all unique images when depth features are active
+    _depth_maps: dict = {}
+    _depth_enabled = (
+        getattr(settings, 'depth_layers_enabled', False)
+        or getattr(settings, 'depth_overlap_enabled', False)
+    )
+    if _depth_enabled:
+        try:
+            from app.core.depth_service import compute_depth_map
+            _seen_paths: set = set()
+            for _cell in layout.cells:
+                if _cell.image_index is None or _cell.image_index >= len(project.images):
+                    continue
+                _st = project.images[_cell.image_index]
+                if not _st.path or _st.path in _seen_paths:
+                    continue
+                _seen_paths.add(_st.path)
+                try:
+                    with Image.open(_st.path) as _raw:
+                        _thumb = ImageOps.exif_transpose(_raw).convert('RGB')
+                        _thumb.thumbnail((512, 512), Image.Resampling.BILINEAR)
+                    _depth_maps[_st.path] = compute_depth_map(_thumb, _st.path)
+                except Exception:
+                    _depth_maps[_st.path] = None
+        except ImportError:
+            _depth_enabled = False
+
     draw_cells = sorted(
         enumerate(layout.cells),
         key=lambda item: (int(getattr(item[1], 'z_index', 0)), item[0]),
@@ -144,6 +171,20 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
             cell_corner_r = 0
         else:
             cell_corner_r = corner_r
+
+        # שכבות עומק — apply depth-aware visual finishing per cell
+        if getattr(settings, 'depth_layers_enabled', False) and _depth_enabled:
+            _dm = _depth_maps.get(state.path)
+            if _dm is not None:
+                try:
+                    from app.core.depth_service import apply_depth_layers
+                    cell_img = apply_depth_layers(
+                        cell_img, _dm,
+                        getattr(settings, 'depth_layers_intensity', 0.5),
+                    )
+                except Exception:
+                    pass
+
         canvas = render_styled_cell(
             canvas, render_x, render_y, render_w, render_h, cell_img,
             corner_radius=cell_corner_r,
@@ -169,6 +210,59 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
     if layout and getattr(layout, 'shape', ''):
         from app.utils.image_utils import apply_shape_mask
         canvas = apply_shape_mask(canvas, layout.shape, settings, scale=1.0)
+
+    # חפיפת עומק — second compositing pass: foreground subjects overflow cell bounds
+    if getattr(settings, 'depth_overlap_enabled', False) and _depth_enabled and not getattr(layout, 'shape', ''):
+        try:
+            from app.core.depth_service import (
+                composite_depth_overlap, average_depth_score, extract_foreground_mask,
+                compute_overlap_amount,
+            )
+            _intensity = getattr(settings, 'depth_overlap_intensity', 0.5)
+            # Collect cells with valid depth, sorted background→foreground
+            _overlap_cells = []
+            for _cell in layout.cells:
+                if _cell.image_index is None or _cell.image_index >= len(project.images):
+                    continue
+                _st = project.images[_cell.image_index]
+                _dm = _depth_maps.get(_st.path)
+                if _dm is None:
+                    continue
+                _overlap_cells.append((average_depth_score(_dm), _cell, _st, _dm))
+            _overlap_cells.sort(key=lambda t: t[0])  # background first, foreground last
+
+            for _score, _cell, _st, _dm in _overlap_cells:
+                _x = int(round(_cell.x)) + bleed_px
+                _y = int(round(_cell.y)) + bleed_px
+                _w = max(1, int(round(_cell.w)))
+                _h = max(1, int(round(_cell.h)))
+                try:
+                    with Image.open(_st.path) as _raw:
+                        _src = ImageOps.exif_transpose(_raw).convert('RGB')
+                    if getattr(_st, 'rotation', 0) and _st.rotation % 360 != 0:
+                        _src = _src.rotate(-_st.rotation, expand=True)
+                    _crop = fit_crop_box(
+                        _src.size, (_w, _h), _st.pan_x, _st.pan_y,
+                        max(1.0, float(getattr(_st, 'zoom', 1.0))),
+                    )
+                    _cimg = _src.crop(_crop).resize((_w, _h), Image.Resampling.LANCZOS)
+                    import numpy as np
+                    _depth_cell = np.array(
+                        Image.fromarray((_dm * 255).astype(np.uint8)).resize(
+                            (_w, _h), Image.Resampling.BILINEAR
+                        )
+                    ).astype(np.float32) / 255.0
+                    canvas = composite_depth_overlap(
+                        canvas, _x, _y, _w, _h, _cimg, _depth_cell, _intensity
+                    )
+                except Exception:
+                    pass
+            if canvas.mode == 'RGBA':
+                _bg = Image.new('RGB', canvas.size, settings.background_rgb)
+                _bg.paste(canvas, mask=canvas.split()[3])
+                canvas = _bg
+        except Exception:
+            pass
 
     # Element overlays (above grid, below text overlays)
     if project.elements:

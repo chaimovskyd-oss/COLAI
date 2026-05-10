@@ -501,6 +501,22 @@ class CollageCanvas(QWidget):
                             rend = rend.resize((render_w,render_h), Image.Resampling.BILINEAR)
                         if idx != self._compare_preview_cell:
                             rend = apply_adjustments(rend, state)
+                        # שכבות עומק — depth-aware finishing (preview)
+                        if getattr(settings, 'depth_layers_enabled', False):
+                            try:
+                                from app.core.depth_service import compute_depth_map, apply_depth_layers
+                                from PIL import ImageOps as _IOS
+                                with Image.open(state.path) as _r:
+                                    _th = _IOS.exif_transpose(_r).convert('RGB')
+                                    _th.thumbnail((256, 256), Image.Resampling.BILINEAR)
+                                _dm = compute_depth_map(_th, state.path)
+                                if _dm is not None:
+                                    rend = apply_depth_layers(
+                                        rend, _dm,
+                                        getattr(settings, 'depth_layers_intensity', 0.5),
+                                    )
+                            except Exception:
+                                pass
                         if getattr(settings, 'smart_crop_debug', False) and getattr(state, 'analysis', None):
                             ddraw = ImageDraw.Draw(rend)
                             for label, rect, color in make_debug_overlay_lines(
@@ -566,6 +582,64 @@ class CollageCanvas(QWidget):
         if layout and getattr(layout, 'shape', ''):
             from app.utils.image_utils import apply_shape_mask
             canvas = apply_shape_mask(canvas, layout.shape, settings, scale=scale)
+
+        # חפיפת עומק — second pass (preview, low-res depth maps)
+        if (
+            layout
+            and getattr(settings, 'depth_overlap_enabled', False)
+            and not getattr(layout, 'shape', '')
+        ):
+            try:
+                import numpy as _np
+                from PIL import ImageOps as _IOS
+                from app.core.depth_service import (
+                    compute_depth_map, composite_depth_overlap, average_depth_score,
+                )
+                from app.utils.image_utils import fit_crop_box as _fcb
+                _intensity = getattr(settings, 'depth_overlap_intensity', 0.5)
+                _scored = []
+                for _cell in layout.cells:
+                    if _cell.image_index is None or _cell.image_index >= len(self.project.images):
+                        continue
+                    _st = self.project.images[_cell.image_index]
+                    if not _st.path:
+                        continue
+                    try:
+                        with Image.open(_st.path) as _r:
+                            _th = _IOS.exif_transpose(_r).convert('RGB')
+                            _th.thumbnail((256, 256), Image.Resampling.BILINEAR)
+                        _dm = compute_depth_map(_th, _st.path)
+                        if _dm is not None:
+                            _scored.append((average_depth_score(_dm), _cell, _st, _dm))
+                    except Exception:
+                        pass
+                _scored.sort(key=lambda t: t[0])
+                for _score, _cell, _st, _dm in _scored:
+                    _x = int(round(_cell.x * sx))
+                    _y = int(round(_cell.y * sy))
+                    _w = max(1, int(round(_cell.w * sx)))
+                    _h = max(1, int(round(_cell.h * sy)))
+                    try:
+                        _cached = get_preview_image(_st.path, _st.rotation)
+                        _crop = _fcb(_cached.size, (_w, _h), _st.pan_x, _st.pan_y,
+                                     max(1.0, float(getattr(_st, 'zoom', 1.0))))
+                        _cimg = _cached.crop(_crop).resize((_w, _h), Image.Resampling.BILINEAR)
+                        _depth_cell = _np.array(
+                            Image.fromarray((_dm * 255).astype(_np.uint8)).resize(
+                                (_w, _h), Image.Resampling.BILINEAR
+                            )
+                        ).astype(_np.float32) / 255.0
+                        canvas = composite_depth_overlap(
+                            canvas, _x, _y, _w, _h, _cimg, _depth_cell, _intensity
+                        )
+                    except Exception:
+                        pass
+                if canvas.mode == 'RGBA':
+                    _bg = Image.new('RGB', canvas.size, settings.background_rgb)
+                    _bg.paste(canvas, mask=canvas.split()[3])
+                    canvas = _bg
+            except Exception:
+                pass
 
         return canvas, pw, ph, sx, sy
 

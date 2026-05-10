@@ -11,7 +11,7 @@ import subprocess
 import urllib.parse
 import urllib.request
 
-from PySide6.QtCore import Qt, QRect, QSize, Signal, QTimer, QFileSystemWatcher
+from PySide6.QtCore import Qt, QRect, QSize, Signal, QTimer, QFileSystemWatcher, QThread
 from PySide6.QtGui import (
     QColor, QDragEnterEvent, QDropEvent, QIcon, QKeySequence,
     QPainter, QPen, QPixmap, QShortcut,
@@ -284,6 +284,50 @@ class DropListWidget(QListWidget):
 
 
 # ---------------------------------------------------------------------------
+# Worker — קרופ חכם (Smart Crop with depth)
+# ---------------------------------------------------------------------------
+
+class _DepthSmartCropWorker(QThread):
+    """Runs DepthAnything + pan update for every image in the project."""
+
+    progress = Signal(int, int)   # (current_index, total)
+    finished = Signal()
+
+    def __init__(self, project, parent=None):
+        super().__init__(parent)
+        self._project = project
+
+    def run(self):
+        import os
+        from PIL import Image, ImageOps
+        from app.core.depth_service import compute_depth_map, compute_smart_crop_pan
+
+        images = [s for s in self._project.images if s.path and os.path.isfile(s.path)]
+        total = len(images)
+        for i, state in enumerate(images):
+            self.progress.emit(i + 1, total)
+            try:
+                with Image.open(state.path) as raw:
+                    img = ImageOps.exif_transpose(raw).convert("RGB")
+                if getattr(state, "rotation", 0) and state.rotation % 360 != 0:
+                    img = img.rotate(-state.rotation, expand=True)
+                # Use already-detected face data — do not re-run detection
+                faces = state.analysis.faces if getattr(state, "analysis", None) else []
+                depth_map = compute_depth_map(img, state.path)
+                new_x, new_y = compute_smart_crop_pan(
+                    img, faces, depth_map, state.pan_x, state.pan_y
+                )
+                state.pan_x = new_x
+                state.pan_y = new_y
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "קרופ חכם נכשל עבור %s: %s", state.path, exc
+                )
+        self.finished.emit()
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -430,6 +474,10 @@ class MainWindow(QMainWindow):
         self._edit_menu.addSeparator()
         a['gen']    = self._edit_menu.addAction('', self.generate_suggestions)
         a['soft_fade'] = self._edit_menu.addAction('', self._open_soft_fade_dialog)
+        self._edit_menu.addSeparator()
+        a['depth_overlap'] = self._edit_menu.addAction('חפיפת עומק...', self._open_depth_overlap_dialog)
+        a['depth_layers']  = self._edit_menu.addAction('שכבות עומק...', self._open_depth_layers_dialog)
+        self._edit_menu.addSeparator()
         a['swap']   = self._edit_menu.addAction('', self._toggle_swap_shortcut)
         a['swap'].setShortcut(QKeySequence('Tab'))
         self._edit_menu.addSeparator()
@@ -583,6 +631,13 @@ class MainWindow(QMainWindow):
         self.refresh_images_btn.setFocusPolicy(Qt.NoFocus)
         self.refresh_images_btn.setToolTip('Reload current image files from disk without changing the collage')
 
+        self.depth_smart_crop_btn = QPushButton('קרופ חכם')
+        self.depth_smart_crop_btn.setFixedHeight(22)
+        self.depth_smart_crop_btn.setStyleSheet(_zbtn + 'QPushButton{font-size:11px; padding:0 8px;}')
+        self.depth_smart_crop_btn.setFocusPolicy(Qt.NoFocus)
+        self.depth_smart_crop_btn.setToolTip('שפר מיקום קרופ לפי ניתוח עומק תמונה')
+        self._depth_worker: Optional[_DepthSmartCropWorker] = None
+
         self._czoom_reset = QPushButton('1:1')
         self._czoom_reset.setFixedSize(32, 22)
         self._czoom_reset.setStyleSheet(_zbtn)
@@ -592,6 +647,7 @@ class MainWindow(QMainWindow):
         zlay.addWidget(self._czoom_out)
         zlay.addWidget(self._czoom_sl, 1)
         zlay.addWidget(self.refresh_images_btn)
+        zlay.addWidget(self.depth_smart_crop_btn)
         zlay.addWidget(self._czoom_in)
         zlay.addSpacing(6)
         zlay.addWidget(self._czoom_lbl)
@@ -604,6 +660,7 @@ class MainWindow(QMainWindow):
         self._czoom_in.clicked.connect(self.canvas.zoom_in)
         self._czoom_reset.clicked.connect(self.canvas.fit_to_screen)
         self.refresh_images_btn.clicked.connect(self.refresh_images_from_disk)
+        self.depth_smart_crop_btn.clicked.connect(self._run_depth_smart_crop)
         self.canvas.displayZoomChanged.connect(self._on_canvas_zoom_changed)
         self.canvas.panChanged.connect(self._sync_canvas_scrollbars)
         self._chscroll.valueChanged.connect(self._on_canvas_hscroll)
@@ -1703,6 +1760,150 @@ class MainWindow(QMainWindow):
         settings.soft_fade_curve = ['smooth', 'linear', 'ease_out'][curve_combo.currentIndex()]
         settings.soft_fade_spacing_override_enabled = spacing_override_chk.isChecked()
         settings.soft_fade_spacing_override_px = spacing_override_spin.value()
+        self.canvas.refresh_preview()
+        self._push_history()
+
+    # -------------------------------------------------------------------
+    # קרופ חכם — Smart Crop with depth
+    # -------------------------------------------------------------------
+
+    def _run_depth_smart_crop(self) -> None:
+        if not self.project or not self.project.images:
+            return
+        if self._depth_worker and self._depth_worker.isRunning():
+            return
+
+        from app.core.depth_service import depth_available
+        if not depth_available():
+            QMessageBox.warning(
+                self, 'קרופ חכם',
+                'ספריית transformers אינה מותקנת.\nהרץ: pip install transformers>=4.35.0'
+            )
+            return
+
+        self.depth_smart_crop_btn.setEnabled(False)
+        self.depth_smart_crop_btn.setText('מנתח תמונות...')
+
+        self._depth_worker = _DepthSmartCropWorker(self.project, self)
+        self._depth_worker.progress.connect(self._on_depth_smart_crop_progress)
+        self._depth_worker.finished.connect(self._on_depth_smart_crop_done)
+        self._depth_worker.start()
+
+    def _on_depth_smart_crop_progress(self, current: int, total: int) -> None:
+        self.depth_smart_crop_btn.setText(f'מעבד {current} מתוך {total}...')
+
+    def _on_depth_smart_crop_done(self) -> None:
+        self.depth_smart_crop_btn.setText('קרופ חכם')
+        self.depth_smart_crop_btn.setEnabled(True)
+        self.canvas.refresh_preview()
+        self._push_history()
+
+    # -------------------------------------------------------------------
+    # חפיפת עומק — Depth Overlap dialog
+    # -------------------------------------------------------------------
+
+    def _open_depth_overlap_dialog(self) -> None:
+        settings = self.project.settings
+        dlg = QDialog(self)
+        dlg.setWindowTitle('חפיפת עומק')
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        enabled_chk = QCheckBox('הפעל חפיפת עומק')
+        enabled_chk.setChecked(getattr(settings, 'depth_overlap_enabled', False))
+
+        intensity_combo = QComboBox()
+        intensity_combo.addItems(['נמוך', 'בינוני', 'גבוה'])
+        _intensity_vals = [0.2, 0.5, 1.0]
+        cur_intensity = getattr(settings, 'depth_overlap_intensity', 0.5)
+        closest_idx = min(range(3), key=lambda i: abs(_intensity_vals[i] - cur_intensity))
+        intensity_combo.setCurrentIndex(closest_idx)
+
+        def _refresh_state(*_):
+            intensity_combo.setEnabled(enabled_chk.isChecked())
+
+        enabled_chk.stateChanged.connect(_refresh_state)
+        _refresh_state()
+
+        form.addRow('', enabled_chk)
+        form.addRow('עוצמה', intensity_combo)
+        layout.addLayout(form)
+
+        info = QLabel(
+            'האפקט מאפשר לדמות הקדמי לחרוג מעט מגבול התא\n'
+            'ולחפוף את התא הסמוך — ליצירת קומפוזיציה טבעית.\n'
+            'אינו משפיע על הגדרות המעבר הרך הקיימות.'
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet('color:#7aa7d9;')
+        layout.addWidget(info)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        settings.depth_overlap_enabled = enabled_chk.isChecked()
+        settings.depth_overlap_intensity = _intensity_vals[intensity_combo.currentIndex()]
+        self.canvas.refresh_preview()
+        self._push_history()
+
+    # -------------------------------------------------------------------
+    # שכבות עומק — Depth Layers dialog
+    # -------------------------------------------------------------------
+
+    def _open_depth_layers_dialog(self) -> None:
+        settings = self.project.settings
+        dlg = QDialog(self)
+        dlg.setWindowTitle('שכבות עומק')
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        enabled_chk = QCheckBox('הפעל שכבות עומק')
+        enabled_chk.setChecked(getattr(settings, 'depth_layers_enabled', False))
+
+        intensity_combo = QComboBox()
+        intensity_combo.addItems(['עדין', 'בינוני', 'חזק'])
+        _intensity_vals = [0.35, 0.65, 1.0]
+        cur_intensity = getattr(settings, 'depth_layers_intensity', 0.5)
+        closest_idx = min(range(3), key=lambda i: abs(_intensity_vals[i] - cur_intensity))
+        intensity_combo.setCurrentIndex(closest_idx)
+
+        def _refresh_state(*_):
+            intensity_combo.setEnabled(enabled_chk.isChecked())
+
+        enabled_chk.stateChanged.connect(_refresh_state)
+        _refresh_state()
+
+        form.addRow('', enabled_chk)
+        form.addRow('עוצמה', intensity_combo)
+        layout.addLayout(form)
+
+        info = QLabel(
+            'תמונות קדמיות: בהירות וחדות מעט יותר.\n'
+            'תמונות אמצע: טשטוש עדין (0.8px).\n'
+            'תמונות רקע: טשטוש, עמעום ועמעום צבע.\n'
+            'האפקט הינו עדין — גמר מקצועי, לא פילטר.'
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet('color:#7aa7d9;')
+        layout.addWidget(info)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        settings.depth_layers_enabled = enabled_chk.isChecked()
+        settings.depth_layers_intensity = _intensity_vals[intensity_combo.currentIndex()]
         self.canvas.refresh_preview()
         self._push_history()
 
@@ -4234,3 +4435,8 @@ class MainWindow(QMainWindow):
             return
         self.history_index += 1
         self._restore_snapshot(self.history[self.history_index])
+
+    def closeEvent(self, event):
+        from app.core.depth_service import release_depth_model
+        release_depth_model()
+        super().closeEvent(event)

@@ -240,6 +240,11 @@ class ProjectSettings:
     smart_crop_debug: bool = False
     analysis_mode: str = 'quick'          # 'quick' | 'scanned'
     advanced_face_backend: str = 'auto'   # 'auto' | 'retinaface' | 'mediapipe'
+    # DepthAnything feature flags
+    depth_overlap_enabled: bool = False
+    depth_overlap_intensity: float = 0.5  # 0..1 (נמוך / בינוני / גבוה)
+    depth_layers_enabled: bool = False
+    depth_layers_intensity: float = 0.5   # 0..1 (עדין / בינוני / חזק)
 
     @property
     def canvas_px(self) -> Tuple[int, int]:
