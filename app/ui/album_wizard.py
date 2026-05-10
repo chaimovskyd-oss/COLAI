@@ -764,8 +764,7 @@ class AlbumWizard(QWidget):
         page_project = self._session.make_page_project(idx)
         if page_project is None:
             return
-        self._canvas.project = page_project
-        self._canvas.refresh_preview()
+        self._canvas.set_project(page_project)
         self._tab_bar.select(idx)
 
     def _export_pdf(self) -> None:
@@ -802,6 +801,24 @@ class AlbumWizard(QWidget):
     def _open_in_main(self) -> None:
         """Emit open_in_main signal — MainWindow will take over from here."""
         self.open_in_main.emit(self._session)
+
+    def reset(self) -> None:
+        """Return the wizard to the same empty state it has at application start."""
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(1000)
+        self._session = AlbumSession()
+        self._img_panel._clear()
+        self._canvas_stack.setCurrentIndex(0)
+        self._tab_bar.rebuild(0)
+        self._progress.hide()
+        self._export_btn.setEnabled(False)
+        self._settings_panel.set_generating(False)
+        self._settings_panel.set_image_count(0)
+        try:
+            self._settings_panel._open_main_btn.hide()
+        except Exception:
+            pass
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

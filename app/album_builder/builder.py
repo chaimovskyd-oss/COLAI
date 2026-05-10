@@ -99,14 +99,17 @@ class AlbumBuilder:
         propagate back to the master project automatically.
         """
         from app.models.project import ProjectState
+        from app.album_builder.session import normalize_album_page_layout
 
         page = album.pages[page_idx]
         pv = ProjectState.__new__(ProjectState)
         pv.settings = self.project.settings
         pv.images = [self.project.images[i] for i in page.image_indices]
+        normalize_album_page_layout(page.layout, pv.settings)
         pv.selected_layout = page.layout
         pv.suggestions = [page.layout] if page.layout else []
         pv.text_overlay = self.project.text_overlay.__class__()
-        pv.text_overlays = []
-        pv.elements = []
+        pv.text_overlays = list(getattr(page, 'text_overlays', []))
+        pv.elements = list(getattr(page, 'elements', []))
+        pv.album_state = None
         return pv

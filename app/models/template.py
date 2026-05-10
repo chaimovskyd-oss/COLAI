@@ -24,7 +24,8 @@ from typing import Dict, List
 # Supported shape types
 # ---------------------------------------------------------------------------
 
-SHAPE_TYPES = ('rectangle', 'rounded', 'circle', 'ellipse', 'polygon', 'heart')
+SHAPE_TYPES = ('rectangle', 'rounded', 'circle', 'ellipse', 'polygon', 'heart',
+               'diagonal_polygon')
 
 _SHAPE_DEFAULT_PARAMS: Dict[str, Dict[str, float]] = {
     'rectangle': {},
@@ -33,6 +34,16 @@ _SHAPE_DEFAULT_PARAMS: Dict[str, Dict[str, float]] = {
     'ellipse':   {},
     'polygon':   {'sides': 6.0, 'rotation': 0.0},
     'heart':     {},
+    # diagonal_polygon: arbitrary convex polygon with vertices stored as
+    # v0x,v0y … vNx,vNy in [0..1] relative to the cell bounding box.
+    # Default is a plain rectangle (4 vertices).
+    'diagonal_polygon': {
+        'v_count': 4.0,
+        'v0x': 0.0, 'v0y': 0.0,
+        'v1x': 1.0, 'v1y': 0.0,
+        'v2x': 1.0, 'v2y': 1.0,
+        'v3x': 0.0, 'v3y': 1.0,
+    },
 }
 
 

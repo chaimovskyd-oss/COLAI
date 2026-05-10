@@ -106,6 +106,7 @@ class ColorEqualizerState:
 @dataclass
 class ImageState:
     path: str
+    asset_type: str = 'photo'       # 'photo' | 'spotify_code'
     pan_x: float = 0.5
     pan_y: float = 0.5
     zoom: float = 1.0
@@ -138,6 +139,11 @@ class CellRect:
     w: float
     h: float
     image_index: Optional[int] = None
+    id: str = ''
+    slot_type: str = 'photo'        # 'photo' | 'spotify_code'
+    aspect_ratio: Optional[float] = None
+    fit_mode: str = 'fill'          # 'fill' | 'contain'
+    locked: bool = False
     # Text cell fields (when set, cell renders as text instead of image)
     cell_text: str = ''
     cell_text_color: Tuple[int, int, int] = (0, 0, 0)
@@ -168,6 +174,9 @@ class LayoutSuggestion:
     # Dynamic / tree-based layout. When set, cells are regenerated from the
     # tree on every drag so the layout is fully interactive.
     tree: Optional[Any] = field(default=None, compare=False, repr=False)
+    # Snapshot of cells at the moment the layout was first selected by the user.
+    # Used by "Reset Layout" to undo any manual divider edits.
+    original_cells: Optional[List[CellRect]] = field(default=None, compare=False, repr=False)
 
 
 @dataclass

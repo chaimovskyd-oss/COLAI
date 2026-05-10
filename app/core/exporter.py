@@ -13,6 +13,7 @@ from app.utils.image_utils import (
     pil_to_qpixmap,
     qpixmap_to_pil,
     render_element_qt,
+    render_image_contain_to_size,
     render_image_to_size,
     render_text_overlay_qt,
     render_styled_cell,
@@ -173,8 +174,24 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
         _exp = _depth_exp.get(cell_index, 0)
         if _exp > 0:
             fade_padding = tuple(fade_padding[i] + _exp for i in range(4))
+        is_spotify_slot = getattr(cell, 'slot_type', 'photo') == 'spotify_code'
+        if is_spotify_slot:
+            fade_padding = (0, 0, 0, 0)
 
-        if any(fade_padding):
+        if getattr(cell, 'fit_mode', 'fill') == 'contain':
+            pad = max(0, int(round(min(w, h) * 0.08)))
+            cell_img = render_image_contain_to_size(
+                state.path,
+                (w, h),
+                state=state,
+                use_cache=False,
+                bg_rgb=settings.background_rgb,
+                padding_px=pad,
+                ignore_rotation=is_spotify_slot,
+            )
+            if (render_w, render_h) != (w, h):
+                cell_img = cell_img.resize((render_w, render_h), Image.Resampling.LANCZOS)
+        elif any(fade_padding):
             with Image.open(state.path) as raw:
                 src = ImageOps.exif_transpose(raw).convert('RGB')
             if getattr(state, 'rotation', 0) and state.rotation % 360 != 0:
@@ -199,7 +216,9 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
             )
             if (render_w, render_h) != (w, h):
                 cell_img = cell_img.resize((render_w, render_h), Image.Resampling.LANCZOS)
-        if has_cell_shape:
+        if is_spotify_slot:
+            cell_corner_r = 0
+        elif has_cell_shape:
             cell_img = apply_cell_shape(cell_img, cell_shape, cell_params,
                                         settings.background_rgb)
             cell_corner_r = 0
@@ -207,7 +226,7 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
             cell_corner_r = corner_r
 
         # שכבות עומק — apply depth-aware visual finishing per cell
-        if getattr(settings, 'depth_layers_enabled', False) and _depth_enabled:
+        if not is_spotify_slot and getattr(settings, 'depth_layers_enabled', False) and _depth_enabled:
             _dm = _depth_maps.get(state.path)
             if _dm is not None:
                 try:
@@ -222,17 +241,19 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
         canvas = render_styled_cell(
             canvas, render_x, render_y, render_w, render_h, cell_img,
             corner_radius=cell_corner_r,
-            border_width=border_w,
+            border_width=0 if is_spotify_slot else border_w,
             border_color=settings.border_color_rgb,
             shadow_enabled=(
+                not is_spotify_slot and (
                 settings.shadow_enabled
                 or getattr(cell, 'edge_style', '') == 'torn_paper'
                 or getattr(cell, 'shape_type', '') == 'ring_segment'
+                )
             ),
             shadow_offset=shadow_off,
             shadow_blur=shadow_blur,
             shadow_opacity=settings.shadow_opacity,
-            edge_style=getattr(cell, 'edge_style', 'hard') if getattr(cell, 'edge_style', '') == 'torn_paper'
+            edge_style='hard' if is_spotify_slot else getattr(cell, 'edge_style', 'hard') if getattr(cell, 'edge_style', '') == 'torn_paper'
             else ('soft_fade' if any(fade_padding) else 'hard'),
             fade_padding=fade_padding,
             fade_curve=getattr(settings, 'soft_fade_curve', 'smooth'),

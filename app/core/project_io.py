@@ -39,6 +39,9 @@ def save_project(project: ProjectState, path: str) -> None:
         'suggestions': [_layout_to_dict(l) for l in project.suggestions],
         'elements': [_element_to_dict(e) for e in project.elements],
     }
+    album_state = getattr(project, 'album_state', None)
+    if album_state is not None:
+        data['album_state'] = _album_to_dict(album_state)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
@@ -61,6 +64,8 @@ def load_project(path: str) -> ProjectState:
         project.selected_layout = project.suggestions[sel_idx]
 
     project.elements = [_element_from_dict(d) for d in raw.get('elements', [])]
+    if raw.get('album_state'):
+        project.album_state = _album_from_dict(raw.get('album_state', {}))
     return project
 
 
@@ -292,6 +297,7 @@ def _color_equalizer_from_dict(d: Dict | None) -> ColorEqualizerState:
 def _image_to_dict(s: ImageState) -> Dict:
     return {
         'path': s.path,
+        'asset_type': getattr(s, 'asset_type', 'photo'),
         'pan_x': s.pan_x,
         'pan_y': s.pan_y,
         'zoom': s.zoom,
@@ -318,6 +324,7 @@ def _image_to_dict(s: ImageState) -> Dict:
 def _image_from_dict(d: Dict) -> ImageState:
     return ImageState(
         path=d['path'],
+        asset_type=d.get('asset_type', 'photo'),
         pan_x=d.get('pan_x', 0.5),
         pan_y=d.get('pan_y', 0.5),
         zoom=d.get('zoom', 1.0),
@@ -406,6 +413,16 @@ def _layout_to_dict(layout: LayoutSuggestion) -> Dict:
 
 def _cell_to_dict(c: CellRect) -> Dict:
     d: Dict = {'x': c.x, 'y': c.y, 'w': c.w, 'h': c.h, 'image_index': c.image_index}
+    if getattr(c, 'id', ''):
+        d['id'] = c.id
+    if getattr(c, 'slot_type', 'photo') != 'photo':
+        d['slot_type'] = c.slot_type
+    if getattr(c, 'aspect_ratio', None) is not None:
+        d['aspect_ratio'] = c.aspect_ratio
+    if getattr(c, 'fit_mode', 'fill') != 'fill':
+        d['fit_mode'] = c.fit_mode
+    if getattr(c, 'locked', False):
+        d['locked'] = bool(c.locked)
     if getattr(c, 'cell_text', ''):
         d['cell_text'] = c.cell_text
         d['cell_text_color'] = list(c.cell_text_color)
@@ -447,6 +464,11 @@ def _layout_from_dict(d: Dict) -> LayoutSuggestion:
 
 def _cell_from_dict(c: Dict) -> CellRect:
     cell = CellRect(x=c['x'], y=c['y'], w=c['w'], h=c['h'], image_index=c.get('image_index'))
+    cell.id = c.get('id', '')
+    cell.slot_type = c.get('slot_type', 'photo')
+    cell.aspect_ratio = c.get('aspect_ratio')
+    cell.fit_mode = c.get('fit_mode', 'fill')
+    cell.locked = bool(c.get('locked', False))
     if 'cell_text' in c:
         cell.cell_text = c['cell_text']
         cell.cell_text_color = tuple(c.get('cell_text_color', [0, 0, 0]))
@@ -488,3 +510,105 @@ def _element_from_dict(d: Dict) -> ElementOverlay:
         rotation_deg=d.get('rotation_deg', 0.0),
         opacity=d.get('opacity', 1.0),
     )
+
+
+def _album_settings_to_dict(settings) -> Dict:
+    return {
+        'density': getattr(settings, 'density', 'mixed'),
+        'min_per_page': getattr(settings, 'min_per_page', 1),
+        'max_per_page': getattr(settings, 'max_per_page', 9),
+        'hero_pages': getattr(settings, 'hero_pages', True),
+        'hero_threshold': getattr(settings, 'hero_threshold', 0.75),
+        'title': getattr(settings, 'title', ''),
+        'target_pages': getattr(settings, 'target_pages', 0),
+    }
+
+
+def _album_settings_from_dict(d: Dict):
+    from app.album_builder.models import AlbumSettings
+
+    settings = AlbumSettings()
+    settings.density = d.get('density', settings.density)
+    settings.min_per_page = int(d.get('min_per_page', settings.min_per_page))
+    settings.max_per_page = int(d.get('max_per_page', settings.max_per_page))
+    settings.hero_pages = bool(d.get('hero_pages', settings.hero_pages))
+    settings.hero_threshold = float(d.get('hero_threshold', settings.hero_threshold))
+    settings.title = d.get('title', settings.title)
+    settings.target_pages = int(d.get('target_pages', settings.target_pages))
+    return settings
+
+
+def _photo_meta_to_dict(meta) -> Dict:
+    return {
+        'path': getattr(meta, 'path', ''),
+        'width': getattr(meta, 'width', 0),
+        'height': getattr(meta, 'height', 0),
+        'orientation': getattr(meta, 'orientation', 'landscape'),
+        'sharpness': getattr(meta, 'sharpness', 0.5),
+        'brightness': getattr(meta, 'brightness', 0.5),
+        'face_count': getattr(meta, 'face_count', 0),
+        'is_screenshot': getattr(meta, 'is_screenshot', False),
+        'importance': getattr(meta, 'importance', 0.5),
+        'phash': getattr(meta, 'phash', ''),
+    }
+
+
+def _photo_meta_from_dict(d: Dict):
+    from app.album_builder.models import PhotoMeta
+
+    return PhotoMeta(
+        path=d.get('path', ''),
+        width=int(d.get('width', 0)),
+        height=int(d.get('height', 0)),
+        orientation=d.get('orientation', 'landscape'),
+        sharpness=float(d.get('sharpness', 0.5)),
+        brightness=float(d.get('brightness', 0.5)),
+        face_count=int(d.get('face_count', 0)),
+        is_screenshot=bool(d.get('is_screenshot', False)),
+        importance=float(d.get('importance', 0.5)),
+        phash=d.get('phash', ''),
+    )
+
+
+def _album_to_dict(album) -> Dict:
+    return {
+        'current_page_index': getattr(album, 'current_page_index', 0),
+        'settings': _album_settings_to_dict(getattr(album, 'settings', None)),
+        'generated': bool(getattr(album, 'generated', False)),
+        'photo_metas': [_photo_meta_to_dict(m) for m in getattr(album, 'photo_metas', [])],
+        'pages': [
+            {
+                'page_index': getattr(page, 'page_index', idx),
+                'image_indices': list(getattr(page, 'image_indices', [])),
+                'layout': _layout_to_dict(page.layout) if getattr(page, 'layout', None) else None,
+                'locked': bool(getattr(page, 'locked', False)),
+                'label': getattr(page, 'label', ''),
+                'text_overlays': [_text_to_dict(o) for o in getattr(page, 'text_overlays', [])],
+                'elements': [_element_to_dict(e) for e in getattr(page, 'elements', [])],
+            }
+            for idx, page in enumerate(getattr(album, 'pages', []))
+        ],
+    }
+
+
+def _album_from_dict(d: Dict):
+    from app.album_builder.models import AlbumPage, AlbumState
+
+    album = AlbumState()
+    album.current_page_index = int(d.get('current_page_index', 0))
+    album.settings = _album_settings_from_dict(d.get('settings', {}))
+    album.generated = bool(d.get('generated', False))
+    album.photo_metas = [_photo_meta_from_dict(m) for m in d.get('photo_metas', [])]
+    for idx, raw_page in enumerate(d.get('pages', [])):
+        layout_raw = raw_page.get('layout')
+        page = AlbumPage(
+            page_index=int(raw_page.get('page_index', idx)),
+            image_indices=[int(i) for i in raw_page.get('image_indices', [])],
+            layout=_layout_from_dict(layout_raw) if layout_raw else None,
+            locked=bool(raw_page.get('locked', False)),
+            label=raw_page.get('label', ''),
+        )
+        page.text_overlays = [_text_from_dict(o) for o in raw_page.get('text_overlays', [])]
+        page.elements = [_element_from_dict(e) for e in raw_page.get('elements', [])]
+        album.pages.append(page)
+    return album

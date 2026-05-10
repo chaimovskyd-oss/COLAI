@@ -31,6 +31,10 @@ STRINGS = {
     'Zoom &Out':                    'ה&קטן',
     '&Fit to Screen':               'ה&תאם למסך',
 
+    '&Tools':                       '&כלים',
+    'Search Spotify song...':       'חיפוש שיר בספוטיפיי...',
+    'Open Spotify Codes':           'פתח Spotify Codes',
+
     'Language':                     'שפה',
     'English':                      'English',
     'Hebrew (עברית)':               'עברית',

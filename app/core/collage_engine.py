@@ -4,10 +4,55 @@ import math
 import random
 from typing import List, Optional, Tuple
 
+
+# ---------------------------------------------------------------------------
+# Spotify code detection helper
+# ---------------------------------------------------------------------------
+
+def detect_spotify_code_image(images: "List[ImageState]") -> "Optional[ImageState]":
+    """Return the first ImageState that looks like a Spotify scan code, or None.
+
+    Heuristic: Spotify codes are wide (aspect ≥ 2:1), and the pixel content is
+    mostly monochromatic (≤ 3 distinct hues when posterised to 8 colours).
+    Falls back to accepting the image if PIL cannot open it.
+    """
+    from PIL import Image as _Image
+    for state in images:
+        try:
+            with _Image.open(state.path) as img:
+                w, h = img.size
+                if h == 0:
+                    continue
+                aspect = w / h
+                # Spotify codes are wider than tall (roughly 4:1 or 3:1)
+                if aspect < 1.5:
+                    continue
+                if aspect >= 2.8:
+                    return state
+                # Quick colour test: convert to palette with 8 colours,
+                # then check how many distinct non-white/non-black colours remain
+                small = img.convert('RGB').resize((120, 30), _Image.BILINEAR)
+                q = small.quantize(colors=8, method=_Image.Quantize.FASTOCTREE)
+                palette = q.getpalette()[:8 * 3]
+                hues = set()
+                for i in range(8):
+                    r, g, b = palette[i*3], palette[i*3+1], palette[i*3+2]
+                    brightness = (r + g + b) / 3
+                    if 20 < brightness < 220:   # skip near-black and near-white
+                        hues.add((r >> 5, g >> 5, b >> 5))
+                # Spotify codes have ≤ 2 mid-tone hues (the bar colour + background tint)
+                if len(hues) <= 3:
+                    return state
+        except Exception:
+            # If we can't open/analyse the image, accept it and let the user proceed
+            return state
+    return None
+
 from PIL import Image
 
 from app.core.smart_crop_service import score_cell_fit
 from app.models.project import CellRect, ImageState, LayoutSuggestion, ProjectSettings
+from app.core.diagonal_layouts import get_diagonal_layouts
 
 
 # ---------------------------------------------------------------------------
@@ -955,6 +1000,121 @@ def custom_grid_layout(
 
 
 # ---------------------------------------------------------------------------
+# Spotify code layouts
+# ---------------------------------------------------------------------------
+
+def _spotify_image_index(images: Optional[List[ImageState]]) -> Optional[int]:
+    if not images:
+        return None
+    for idx, state in enumerate(images):
+        if getattr(state, 'asset_type', 'photo') == 'spotify_code':
+            return idx
+    code_state = detect_spotify_code_image(images)
+    if code_state is None:
+        return None
+    for idx, state in enumerate(images):
+        if state is code_state:
+            state.asset_type = 'spotify_code'
+            return idx
+    return None
+
+
+def _spotify_code_cell(x: float, y: float, w: float, h: float, image_index: int) -> CellRect:
+    cell = CellRect(x, y, max(1.0, w), max(1.0, h), image_index=image_index)
+    cell.id = 'spotify_code'
+    cell.slot_type = 'spotify_code'
+    cell.asset_type = 'spotify_code'
+    cell.fit_mode = 'contain'
+    cell.locked = True
+    cell.aspect_ratio = max(1.0, w / max(1.0, h))
+    return cell
+
+
+def _assign_spotify_photo_cells(cells: List[CellRect], image_count: int, spotify_idx: int) -> None:
+    photo_indices = [idx for idx in range(image_count) if idx != spotify_idx]
+    for cell, image_idx in zip(cells, photo_indices):
+        cell.image_index = image_idx
+
+
+def create_spotify_bottom_layout(
+    settings: ProjectSettings,
+    image_count: int,
+    images: Optional[List[ImageState]] = None,
+) -> LayoutSuggestion:
+    """Photo collage with a scan-safe Spotify code strip at the bottom."""
+    width, height = settings.canvas_px
+    margin = float(settings.margin_px)
+    spacing = float(settings.spacing_px)
+    usable_w = float(width - 2 * margin)
+    usable_h = float(height - 2 * margin)
+    spotify_idx = _spotify_image_index(images)
+    if spotify_idx is None:
+        spotify_idx = max(0, image_count - 1)
+    photo_count = max(0, image_count - 1)
+
+    code_h = min(usable_h * 0.20, max(1.0, usable_w / 4.2))
+    code_w = min(usable_w, max(usable_w * 0.58, code_h * 4.4))
+    code_x = margin + (usable_w - code_w) / 2.0
+    code_y = margin + usable_h - code_h
+
+    cells: List[CellRect] = []
+    if photo_count:
+        top_h = max(1.0, usable_h - code_h - spacing)
+        photo_cells = _make_grid_cells(
+            photo_count,
+            margin,
+            margin,
+            usable_w,
+            top_h,
+            spacing,
+            3 if photo_count <= 9 else 4,
+        )
+        _assign_spotify_photo_cells(photo_cells, image_count, spotify_idx)
+        cells.extend(photo_cells)
+
+    cells.append(_spotify_code_cell(code_x, code_y, code_w, code_h, spotify_idx))
+    return LayoutSuggestion(name='Spotify Bottom', cells=cells)
+
+
+def create_spotify_center_layout(
+    settings: ProjectSettings,
+    image_count: int,
+    images: Optional[List[ImageState]] = None,
+) -> LayoutSuggestion:
+    """Photo collage split around a centered scan-safe Spotify code strip."""
+    width, height = settings.canvas_px
+    margin = float(settings.margin_px)
+    spacing = float(settings.spacing_px)
+    usable_w = float(width - 2 * margin)
+    usable_h = float(height - 2 * margin)
+    spotify_idx = _spotify_image_index(images)
+    if spotify_idx is None:
+        spotify_idx = max(0, image_count - 1)
+    photo_count = max(0, image_count - 1)
+
+    code_h = min(usable_h * 0.16, max(1.0, usable_w / 4.8))
+    code_w = min(usable_w * 0.76, max(usable_w * 0.52, code_h * 4.4))
+    code_x = margin + (usable_w - code_w) / 2.0
+    code_y = margin + (usable_h - code_h) / 2.0
+
+    cells: List[CellRect] = []
+    if photo_count:
+        top_count = (photo_count + 1) // 2
+        bottom_count = photo_count - top_count
+        top_h = max(1.0, code_y - margin - spacing)
+        bottom_y = code_y + code_h + spacing
+        bottom_h = max(1.0, margin + usable_h - bottom_y)
+        top_cells = _make_grid_cells(top_count, margin, margin, usable_w, top_h, spacing, min(top_count, 4))
+        bottom_cells = _make_grid_cells(bottom_count, margin, bottom_y, usable_w, bottom_h, spacing, min(bottom_count, 4))
+        photo_cells = top_cells + bottom_cells
+        _assign_spotify_photo_cells(photo_cells, image_count, spotify_idx)
+        cells.extend(photo_cells)
+
+    cells.append(_spotify_code_cell(code_x, code_y, code_w, code_h, spotify_idx))
+    return LayoutSuggestion(name='Spotify Center', cells=cells)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -993,6 +1153,17 @@ def generate_suggestions(
         _torn_paper_collage_layout(settings, image_count),
         _circle_ring_collage_layout(settings, image_count),
     ]
+
+    spotify_idx = _spotify_image_index(images)
+    if spotify_idx is not None:
+        candidates.extend([
+            create_spotify_bottom_layout(settings, image_count, images),
+            create_spotify_center_layout(settings, image_count, images),
+        ])
+
+    # Diagonal / editorial layouts (best for 2–6 images)
+    candidates.extend(get_diagonal_layouts(settings, image_count))
+
     if custom_cols > 0:
         candidates.append(custom_grid_layout(settings, image_count, custom_cols))
 
@@ -1011,9 +1182,21 @@ def generate_suggestions(
             f'{layout.name} has {len(layout.cells)} cells for {image_count} images'
         )
 
+    _SKIP_OPTIMIZE = {
+        'torn_paper_collage', 'circle_ring_collage',
+        'Spotify Bottom', 'Spotify Center',
+        'Diagonal Split Left', 'Diagonal Split Right',
+        'Diagonal Bands Left', 'Diagonal Bands Right',
+        'Diagonal Hero Left', 'Diagonal Hero Right',
+        'Hybrid Diagonal Top Left', 'Hybrid Diagonal Top Right',
+        'Hybrid Hero Diagonal',
+        'Geometric Triangle Split Left', 'Geometric Triangle Split Right',
+        'Geometric Hero Bottom', 'Geometric Center Diamond',
+        'Geometric Diagonal Mosaic',
+    }
     if images:
         for layout in unique:
-            if layout.name not in {'torn_paper_collage', 'circle_ring_collage'}:
+            if layout.name not in _SKIP_OPTIMIZE:
                 _optimize_layout_assignments(layout, images)
             layout.score = _score_layout(layout, images)
         unique.sort(key=lambda s: s.score, reverse=True)

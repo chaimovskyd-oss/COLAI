@@ -15,6 +15,53 @@ if TYPE_CHECKING:
 from .models import AlbumSettings, AlbumState
 
 
+def normalize_album_page_layout(layout, settings: 'ProjectSettings') -> None:
+    """Scale stale album-page cell coordinates to the current page canvas.
+
+    Album pages can be generated in one canvas/DPI context and then opened in
+    another. When that happens the cells may occupy only a corner of the page.
+    This keeps the existing composition but fits it back into the usable page
+    area.
+    """
+    if layout is None or not getattr(layout, 'cells', None):
+        return
+    try:
+        canvas_w, canvas_h = settings.canvas_px
+        margin = float(getattr(settings, 'margin_px', 0))
+        cells = layout.cells
+        left = min(float(c.x) for c in cells)
+        top = min(float(c.y) for c in cells)
+        right = max(float(c.x) + float(c.w) for c in cells)
+        bottom = max(float(c.y) + float(c.h) for c in cells)
+        bw = max(1.0, right - left)
+        bh = max(1.0, bottom - top)
+        target_left = margin
+        target_top = margin
+        target_w = max(1.0, float(canvas_w) - 2.0 * margin)
+        target_h = max(1.0, float(canvas_h) - 2.0 * margin)
+        if (
+            target_w * 0.72 <= bw <= target_w * 1.20
+            and target_h * 0.72 <= bh <= target_h * 1.20
+        ):
+            return
+        sx = target_w / bw
+        sy = target_h / bh
+        for cell in cells:
+            cell.x = target_left + (float(cell.x) - left) * sx
+            cell.y = target_top + (float(cell.y) - top) * sy
+            cell.w = max(1.0, float(cell.w) * sx)
+            cell.h = max(1.0, float(cell.h) * sy)
+        orig = getattr(layout, 'original_cells', None)
+        if orig:
+            for cell in orig:
+                cell.x = target_left + (float(cell.x) - left) * sx
+                cell.y = target_top + (float(cell.y) - top) * sy
+                cell.w = max(1.0, float(cell.w) * sx)
+                cell.h = max(1.0, float(cell.h) * sy)
+    except Exception:
+        return
+
+
 @dataclass
 class AlbumSession:
     """Standalone context for the Album Wizard."""
@@ -49,6 +96,7 @@ class AlbumSession:
         pv = ProjectState.__new__(ProjectState)
         pv.settings = self.make_settings()
         pv.images = [self.image_states[i] for i in page.image_indices]
+        normalize_album_page_layout(page.layout, pv.settings)
         pv.selected_layout = page.layout
         pv.suggestions = [page.layout] if page.layout else []
         from app.models.project import TextOverlay

@@ -36,11 +36,11 @@ class _PreviewImageInfo:
 class _PreviewPageItem:
     """Minimal page item metadata shape expected by QualityAnalysisService."""
 
-    def __init__(self, image_id: str, target_width_mm: float, target_height_mm: float):
+    def __init__(self, image_id: str, target_width_mm: float, target_height_mm: float, fit_mode: str = "fill"):
         self.image_id = image_id
         self.target_width_mm = target_width_mm
         self.target_height_mm = target_height_mm
-        self.fit_mode = "fill"
+        self.fit_mode = fit_mode
 
 
 class CollagePreviewPage:
@@ -77,6 +77,7 @@ class CollagePreviewPage:
                     image_id=image.path,
                     target_width_mm=max(0.01, float(cell.w) / max(1, canvas_w) * width_mm),
                     target_height_mm=max(0.01, float(cell.h) / max(1, canvas_h) * height_mm),
+                    fit_mode=getattr(cell, "fit_mode", "fill"),
                 )
             )
         return items

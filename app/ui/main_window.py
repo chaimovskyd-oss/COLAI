@@ -3882,10 +3882,67 @@ class MainWindow(QMainWindow):
             target = (max(1, int(round(cell.w))), max(1, int(round(cell.h))))
             state.pan_x, state.pan_y = self._auto_pan(state, target)
 
+    def _current_image_sequence(self, project: ProjectState) -> List[int]:
+        """Image order currently visible in the active layout, followed by leftovers."""
+        seen: set[int] = set()
+        sequence: List[int] = []
+        layout = project.selected_layout
+        if layout:
+            for cell in layout.cells:
+                idx = cell.image_index
+                if idx is not None and 0 <= idx < len(project.images) and idx not in seen:
+                    sequence.append(idx)
+                    seen.add(idx)
+        for idx in range(len(project.images)):
+            if idx not in seen:
+                sequence.append(idx)
+        return sequence
+
+    def _apply_image_sequence_to_layout(self, layout, project: ProjectState, sequence: List[int]) -> None:
+        """Fill a newly selected layout with the current image order.
+
+        This prevents stale suggestions from reintroducing old assignments or
+        leaving cells empty after the user swapped/dragged images in another
+        layout. Locked/Spotify slots keep their dedicated image when possible.
+        """
+        if not layout or not project.images:
+            return
+
+        assigned: set[int] = set()
+        for cell in layout.cells:
+            if getattr(cell, 'slot_type', 'photo') == 'spotify_code':
+                spotify_idx = next(
+                    (i for i, st in enumerate(project.images)
+                     if getattr(st, 'asset_type', 'photo') == 'spotify_code'),
+                    cell.image_index if cell.image_index is not None else None,
+                )
+                if spotify_idx is not None and 0 <= spotify_idx < len(project.images):
+                    cell.image_index = spotify_idx
+                    assigned.add(spotify_idx)
+                continue
+            if getattr(cell, 'locked', False) and cell.image_index is not None:
+                if 0 <= cell.image_index < len(project.images):
+                    assigned.add(cell.image_index)
+                continue
+            cell.image_index = None
+
+        pool = [idx for idx in sequence if 0 <= idx < len(project.images) and idx not in assigned]
+        pool.extend(idx for idx in range(len(project.images)) if idx not in assigned and idx not in pool)
+
+        for cell in layout.cells:
+            if getattr(cell, 'slot_type', 'photo') == 'spotify_code' or getattr(cell, 'locked', False):
+                continue
+            if getattr(cell, 'cell_text', ''):
+                continue
+            cell.image_index = pool.pop(0) if pool else None
+
     def select_layout(self, index: int):
         if index < 0 or index >= len(self.project.suggestions):
             return
+        active_project = self._active_project
+        sequence = self._current_image_sequence(active_project)
         layout = self.project.suggestions[index]
+        self._apply_image_sequence_to_layout(layout, active_project, sequence)
         self._stamp_original_cells(layout)
         self.project.selected_layout = layout
         # Exit layout edit mode when switching layouts
@@ -3910,6 +3967,7 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "_album_sugg_cache"):
                     self._album_sugg_cache.pop(cur, None)
             self._apply_face_pan_to_layout_for(layout, self.canvas.project)
+            self._sync_album_page_data()
         else:
             self._apply_face_pan_to_layout(layout)
 
@@ -4748,8 +4806,36 @@ class MainWindow(QMainWindow):
     # Project save / load / new
     # -------------------------------------------------------------------
 
+    def _reset_album_runtime_state(self) -> None:
+        """Clear every album-mode artifact so a new project starts truly empty."""
+        if hasattr(self, '_album_page_timer') and self._album_page_timer.isActive():
+            self._album_page_timer.stop()
+        self._active_album_session = None
+        self._album_page_cache = {}
+        self._album_sugg_cache = {}
+        if hasattr(self, '_album_strip'):
+            self._album_strip.hide()
+        if hasattr(self, '_album_images_grp'):
+            self._album_images_grp.hide()
+        if hasattr(self, '_album_image_list'):
+            self._album_image_list.clear()
+        self.canvas._fast_preview_max = 1400
+        if hasattr(self, '_album_mode_btn'):
+            self._album_mode_btn.blockSignals(True)
+            self._album_mode_btn.setChecked(False)
+            self._album_mode_btn.setText('🎞  אלבום')
+            self._album_mode_btn.blockSignals(False)
+        if hasattr(self, '_central_stack'):
+            self._central_stack.setCurrentIndex(0)
+        if hasattr(self, '_album_wizard') and hasattr(self._album_wizard, 'reset'):
+            self._album_wizard.reset()
+
     def new_project(self):
-        if self.project.images:
+        has_album = (
+            getattr(self, '_active_album_session', None) is not None
+            or (hasattr(self, '_album_strip') and self._album_strip.isVisible())
+        )
+        if self.project.images or has_album:
             ans = QMessageBox.question(
                 self, 'New Project',
                 'Discard current project and start fresh?',
@@ -4757,10 +4843,18 @@ class MainWindow(QMainWindow):
             )
             if ans != QMessageBox.Yes:
                 return
+        self._reset_album_runtime_state()
         self.project = ProjectState()
         self.image_list.clear()
         self.layout_list.clear()
         self.warnings_label.setText('')
+        self.selected_label.setText('—')
+        self._right_stack.setCurrentIndex(0)
+        self.canvas.set_layout_edit_mode(False)
+        if hasattr(self, '_layout_edit_btn'):
+            self._layout_edit_btn.blockSignals(True)
+            self._layout_edit_btn.setChecked(False)
+            self._layout_edit_btn.blockSignals(False)
         self.canvas.set_project(self.project)
         self.history = []
         self.history_index = -1
@@ -4795,6 +4889,7 @@ class MainWindow(QMainWindow):
             return
 
         self._clear_external_image_watches()
+        self._reset_album_runtime_state()
         self.project = project
         self.history = []
         self.history_index = -1
@@ -5616,8 +5711,7 @@ class MainWindow(QMainWindow):
         self.project.suggestions = suggs
         self.project.selected_layout = page_project.selected_layout
 
-        self.canvas.project = page_project
-        self.canvas.refresh_preview()
+        self.canvas.set_project(page_project)
         self._album_strip.select(idx)
         self._rebuild_layout_list(select=page_project.selected_layout)
         self.on_cell_selected(self.canvas.selected_cell_index)
@@ -5725,7 +5819,8 @@ class MainWindow(QMainWindow):
         target_state = ap.images[cell.image_index]
         session = getattr(self, '_active_album_session', None)
 
-        if session:
+        if session and session.album_state:
+            page = session.album_state.current_page
             # Find if dragged image is already on this page → swap cells
             for src_idx, img in enumerate(ap.images):
                 if img.path == image_path and src_idx != cell.image_index:
@@ -5733,19 +5828,28 @@ class MainWindow(QMainWindow):
                     ap.images[cell.image_index], ap.images[src_idx] = (
                         ap.images[src_idx], ap.images[cell.image_index]
                     )
+                    if page and cell.image_index < len(page.image_indices) and src_idx < len(page.image_indices):
+                        page.image_indices[cell.image_index], page.image_indices[src_idx] = (
+                            page.image_indices[src_idx], page.image_indices[cell.image_index]
+                        )
                     self.canvas.refresh_preview()
+                    self._sync_album_page_data()
                     self._push_history()
                     return
 
             # Dragged from another page: find the source ImageState
-            dragged_state = next(
-                (s for s in session.image_states if s.path == image_path), None
+            dragged_pair = next(
+                ((i, s) for i, s in enumerate(session.image_states) if s.path == image_path), None
             )
-            if dragged_state is not None:
+            if dragged_pair is not None:
+                global_idx, dragged_state = dragged_pair
                 ap.images[cell.image_index] = dragged_state
+                if page and cell.image_index < len(page.image_indices):
+                    page.image_indices[cell.image_index] = global_idx
                 # Refresh the sidebar (order may have changed)
                 self._album_image_list.set_images(session.image_states)
                 self.canvas.refresh_preview()
+                self._sync_album_page_data()
                 self._push_history()
                 return
 
@@ -5753,8 +5857,15 @@ class MainWindow(QMainWindow):
         from app.models.project import ImageState
         from app.utils.image_utils import invalidate_cache
         invalidate_cache(target_state.path)
-        ap.images[cell.image_index] = ImageState(path=image_path, analysis_status='quick')
+        new_state = ImageState(path=image_path, analysis_status='quick')
+        ap.images[cell.image_index] = new_state
+        if session and session.album_state:
+            page = session.album_state.current_page
+            session.image_states.append(new_state)
+            if page and cell.image_index < len(page.image_indices):
+                page.image_indices[cell.image_index] = len(session.image_states) - 1
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
 
     def _close_album_view(self) -> None:
@@ -5764,7 +5875,6 @@ class MainWindow(QMainWindow):
         self._album_strip.hide()
         self._album_images_grp.hide()  # hide sidebar when leaving album mode
         self.canvas._fast_preview_max = 1400  # restore full quality
-        self.canvas.project = self.project
-        self.canvas.refresh_preview()
+        self.canvas.set_project(self.project)
 
     # Album mode handlers moved to AlbumWizard widget (app/ui/album_wizard.py)

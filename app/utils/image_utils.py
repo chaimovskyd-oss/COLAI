@@ -524,6 +524,52 @@ def render_image_to_size(
     return result
 
 
+def render_image_contain_to_size(
+    path: str,
+    target_size: Tuple[int, int],
+    state: Optional['ImageState'] = None,
+    use_cache: bool = False,
+    *,
+    bg_rgb: Tuple[int, int, int] = (255, 255, 255),
+    padding_px: int = 0,
+    ignore_rotation: bool = False,
+) -> Image.Image:
+    """Render *path* scaled to fit *target_size* while preserving aspect ratio.
+
+    The image is letterboxed (contain mode): it is scaled so that the entire
+    image is visible, centred on a background-coloured canvas.  *padding_px*
+    adds extra margin around the image inside the cell.
+    """
+    rotation = (state.rotation if (state and not ignore_rotation) else 0)
+    if use_cache:
+        img = get_preview_image(path, rotation)
+        resample = Image.Resampling.BILINEAR
+    else:
+        with Image.open(path) as raw:
+            img = ImageOps.exif_transpose(raw).convert('RGB')
+        if rotation and rotation % 360 != 0:
+            img = img.rotate(-rotation, expand=True)
+        resample = Image.Resampling.LANCZOS
+
+    if state is not None and not ignore_rotation:
+        img = apply_adjustments(img, state)
+
+    tw, th = target_size
+    inner_w = max(1, tw - padding_px * 2)
+    inner_h = max(1, th - padding_px * 2)
+    iw, ih = img.size
+    scale = min(inner_w / max(1, iw), inner_h / max(1, ih))
+    new_w = max(1, int(round(iw * scale)))
+    new_h = max(1, int(round(ih * scale)))
+    resized = img.resize((new_w, new_h), resample)
+
+    canvas = Image.new('RGB', (tw, th), bg_rgb)
+    paste_x = (tw - new_w) // 2
+    paste_y = (th - new_h) // 2
+    canvas.paste(resized, (paste_x, paste_y))
+    return canvas
+
+
 def image_resolution_ok(path: str, cell_px: Tuple[int, int], dpi: int = 300) -> bool:
     try:
         with Image.open(path) as img:
@@ -1156,6 +1202,19 @@ def make_cell_shape_mask(
             # numpy unavailable — fallback to ellipse
             draw.ellipse([0, 0, w - 1, h - 1], fill=255)
 
+    elif shape_type == 'diagonal_polygon':
+        # Vertices stored as v0x,v0y … vNx,vNy in [0..1] relative to cell bbox.
+        n_verts = int(shape_params.get('v_count', 4))
+        pts = [
+            (shape_params.get(f'v{i}x', 0.0) * (w - 1),
+             shape_params.get(f'v{i}y', 0.0) * (h - 1))
+            for i in range(n_verts)
+        ]
+        if len(pts) >= 3:
+            draw.polygon(pts, fill=255)
+        else:
+            draw.rectangle([0, 0, w - 1, h - 1], fill=255)
+
     else:
         # Unknown shape — treat as rectangle
         draw.rectangle([0, 0, w - 1, h - 1], fill=255)
@@ -1180,7 +1239,9 @@ def apply_cell_shape(
     w, h = cell_img.size
     mask = make_cell_shape_mask(w, h, shape_type, shape_params)
 
-    if shape_type == 'ring_segment':
+    if shape_type in ('ring_segment', 'diagonal_polygon'):
+        # Return RGBA so transparent (masked-out) areas don't overwrite
+        # adjacent cells when composited onto the canvas.
         src = cell_img.convert('RGBA')
         src.putalpha(mask)
         return src
