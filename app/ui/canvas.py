@@ -24,6 +24,7 @@ from app.utils.image_utils import (
     make_debug_overlay_lines,
     mm_to_px,
     pil_to_qpixmap,
+    render_image_contain_to_size,
     render_element_qt,
     render_styled_cell,
     render_text_overlay_qt,
@@ -437,7 +438,8 @@ class CollageCanvas(QWidget):
         assert self.project is not None
         settings = self.project.settings
         width, height = settings.canvas_px
-        scale = min(1.0, 1400 / max(width, height))
+        _max_dim = getattr(self, '_fast_preview_max', 1400)
+        scale = min(1.0, _max_dim / max(width, height))
         pw = max(1, int(width * scale))
         ph = max(1, int(height * scale))
         sx = pw / width
@@ -517,7 +519,6 @@ class CollageCanvas(QWidget):
                 if cell.image_index is not None and cell.image_index < len(self.project.images):
                     state = self.project.images[cell.image_index]
                     try:
-                        cached = get_preview_image(state.path, state.rotation)
                         cell_shape  = getattr(cell, 'shape_type', 'rectangle')
                         cell_params = getattr(cell, 'shape_params', {})
                         has_cell_shape = bool(cell_shape and cell_shape != 'rectangle')
@@ -526,14 +527,33 @@ class CollageCanvas(QWidget):
                         # for the whole-layout shape mask we do the same.
                         clamp_crop = not (is_shaped or has_cell_shape)
                         render_zoom = self._render_zoom_for_cell(state)
-                        crop   = fit_crop_box(cached.size, (w,h), state.pan_x, state.pan_y, render_zoom,
-                                              clamp=clamp_crop)
                         fade_padding = self._cell_render_padding(cell, render_w, render_h)
                         # חפיפת עומק: soft expansion for foreground cells (preview)
                         _exp2 = _dexp_preview.get(idx, 0)
                         if _exp2 > 0:
                             fade_padding = tuple(fade_padding[i] + _exp2 for i in range(4))
-                        if any(fade_padding):
+                        is_spotify_slot = getattr(cell, 'slot_type', 'photo') == 'spotify_code'
+                        if is_spotify_slot:
+                            fade_padding = (0, 0, 0, 0)
+                        if getattr(cell, 'fit_mode', 'fill') == 'contain':
+                            rend = render_image_contain_to_size(
+                                state.path,
+                                (render_w, render_h),
+                                state=state,
+                                use_cache=True,
+                                bg_rgb=settings.background_rgb,
+                                padding_px=max(0, int(round(min(render_w, render_h) * 0.08))),
+                                ignore_rotation=is_spotify_slot,
+                            )
+                            crop = (0, 0, render_w, render_h)
+                            cached = rend
+                        else:
+                            cached = get_preview_image(state.path, state.rotation)
+                            crop = fit_crop_box(cached.size, (w,h), state.pan_x, state.pan_y, render_zoom,
+                                                clamp=clamp_crop)
+                        if getattr(cell, 'fit_mode', 'fill') == 'contain':
+                            pass
+                        elif any(fade_padding):
                             env_w = render_w + fade_padding[0] + fade_padding[2]
                             env_h = render_h + fade_padding[1] + fade_padding[3]
                             env_crop = expand_crop_box_for_padding(crop, (w, h), fade_padding)
@@ -545,7 +565,7 @@ class CollageCanvas(QWidget):
                         else:
                             rend = cached.crop(crop)
                             rend = rend.resize((render_w,render_h), Image.Resampling.BILINEAR)
-                        if idx != self._compare_preview_cell:
+                        if idx != self._compare_preview_cell and getattr(cell, 'fit_mode', 'fill') != 'contain':
                             rend = apply_adjustments(rend, state)
                         # שכבות עומק — depth-aware finishing (preview)
                         if getattr(settings, 'depth_layers_enabled', False):
@@ -572,7 +592,9 @@ class CollageCanvas(QWidget):
                                 ddraw.rectangle([l, t, r, b], outline=color, width=2)
                                 ddraw.text((max(0, l + 2), max(0, t + 2)), label, fill=color)
                         # Apply per-cell shape mask before styled rendering
-                        if has_cell_shape:
+                        if is_spotify_slot:
+                            cell_corner_r = 0
+                        elif has_cell_shape:
                             rend = apply_cell_shape(rend, cell_shape, cell_params,
                                                     settings.background_rgb)
                             cell_corner_r = 0   # shape mask already handles clipping
@@ -580,16 +602,18 @@ class CollageCanvas(QWidget):
                             cell_corner_r = corner_r
                         canvas = render_styled_cell(
                             canvas, render_x, render_y, render_w, render_h, rend,
-                            corner_radius=cell_corner_r, border_width=border_w,
+                            corner_radius=cell_corner_r, border_width=0 if is_spotify_slot else border_w,
                             border_color=settings.border_color_rgb,
                             shadow_enabled=(
+                                not is_spotify_slot and (
                                 settings.shadow_enabled
                                 or getattr(cell, 'edge_style', '') == 'torn_paper'
                                 or getattr(cell, 'shape_type', '') == 'ring_segment'
+                                )
                             ),
                             shadow_offset=shadow_off, shadow_blur=shadow_blur,
                             shadow_opacity=settings.shadow_opacity,
-                            edge_style=getattr(cell, 'edge_style', 'hard') if getattr(cell, 'edge_style', '') == 'torn_paper' else 'soft_fade',
+                            edge_style='hard' if is_spotify_slot else getattr(cell, 'edge_style', 'hard') if getattr(cell, 'edge_style', '') == 'torn_paper' else 'soft_fade',
                             fade_padding=fade_padding,
                             fade_curve=getattr(settings, 'soft_fade_curve', 'smooth'),
                             rotation_deg=getattr(cell, 'rotation_deg', 0.0),
@@ -700,12 +724,30 @@ class CollageCanvas(QWidget):
         cell_params  = getattr(cell, 'shape_params', {})
         has_cell_shape = bool(cell_shape and cell_shape != 'rectangle')
         try:
-            cached = get_preview_image(state.path, state.rotation)
             clamp_crop = not (is_shaped or has_cell_shape)
             render_zoom = self._render_zoom_for_cell(state)
-            crop   = fit_crop_box(cached.size, (w,h), state.pan_x, state.pan_y, render_zoom,
-                                  clamp=clamp_crop)
-            if any(fade_padding):
+            is_spotify_slot = getattr(cell, 'slot_type', 'photo') == 'spotify_code'
+            if is_spotify_slot:
+                fade_padding = (0, 0, 0, 0)
+            if getattr(cell, 'fit_mode', 'fill') == 'contain':
+                rend = render_image_contain_to_size(
+                    state.path,
+                    (render_w, render_h),
+                    state=state,
+                    use_cache=True,
+                    bg_rgb=settings.background_rgb,
+                    padding_px=max(0, int(round(min(render_w, render_h) * 0.08))),
+                    ignore_rotation=is_spotify_slot,
+                )
+                crop = (0, 0, render_w, render_h)
+                cached = rend
+            else:
+                cached = get_preview_image(state.path, state.rotation)
+                crop = fit_crop_box(cached.size, (w,h), state.pan_x, state.pan_y, render_zoom,
+                                    clamp=clamp_crop)
+            if getattr(cell, 'fit_mode', 'fill') == 'contain':
+                pass
+            elif any(fade_padding):
                 env_w = render_w + fade_padding[0] + fade_padding[2]
                 env_h = render_h + fade_padding[1] + fade_padding[3]
                 env_crop = expand_crop_box_for_padding(crop, (w, h), fade_padding)
@@ -717,7 +759,7 @@ class CollageCanvas(QWidget):
             else:
                 rend = cached.crop(crop)
                 rend = rend.resize((render_w,render_h), Image.Resampling.BILINEAR)
-            if cell_index != self._compare_preview_cell:
+            if cell_index != self._compare_preview_cell and getattr(cell, 'fit_mode', 'fill') != 'contain':
                 rend = apply_adjustments(rend, state)
             if getattr(settings, 'smart_crop_debug', False) and getattr(state, 'analysis', None):
                 ddraw = ImageDraw.Draw(rend)
@@ -727,7 +769,9 @@ class CollageCanvas(QWidget):
                     l, t, r, b = rect
                     ddraw.rectangle([l, t, r, b], outline=color, width=2)
                     ddraw.text((max(0, l + 2), max(0, t + 2)), label, fill=color)
-            if has_cell_shape:
+            if is_spotify_slot:
+                cell_corner_r = 0
+            elif has_cell_shape:
                 rend = apply_cell_shape(rend, cell_shape, cell_params,
                                         settings.background_rgb)
                 cell_corner_r = 0
@@ -739,13 +783,15 @@ class CollageCanvas(QWidget):
                 settings.background_rgb,
             )
             tile = render_styled_cell(tile, fade_padding[0], fade_padding[1], render_w, render_h, rend,
-                                      corner_radius=cell_corner_r, border_width=border_w,
+                                      corner_radius=cell_corner_r, border_width=0 if is_spotify_slot else border_w,
                                       border_color=settings.border_color_rgb,
                                       shadow_enabled=(
+                                          not is_spotify_slot and (
                                           getattr(cell, 'edge_style', '') == 'torn_paper'
                                           or getattr(cell, 'shape_type', '') == 'ring_segment'
+                                          )
                                       ),
-                                      edge_style=getattr(cell, 'edge_style', 'hard') if getattr(cell, 'edge_style', '') == 'torn_paper'
+                                      edge_style='hard' if is_spotify_slot else getattr(cell, 'edge_style', 'hard') if getattr(cell, 'edge_style', '') == 'torn_paper'
                                       else ('soft_fade' if getattr(settings, 'soft_fade_enabled', False) else 'hard'),
                                       fade_padding=fade_padding,
                                       fade_curve=getattr(settings, 'soft_fade_curve', 'smooth'),
@@ -1372,6 +1418,9 @@ class CollageCanvas(QWidget):
         if not self.swap_mode and self.project and self.project.selected_layout:
             circle_hit = self._find_swap_circle_at(pos)
             if circle_hit >= 0:
+                cells = self.project.selected_layout.cells
+                if getattr(cells[circle_hit], 'locked', False):
+                    return
                 if self._swap_circle_source < 0:
                     # First click: mark as swap source
                     self._swap_circle_source = circle_hit
@@ -1380,11 +1429,11 @@ class CollageCanvas(QWidget):
                     src, dst = self._swap_circle_source, circle_hit
                     self._swap_circle_source = -1
                     if src != dst:
-                        cells = self.project.selected_layout.cells
-                        cells[src].image_index, cells[dst].image_index = (
-                            cells[dst].image_index, cells[src].image_index)
-                        self._sync_tree_leaves_from_layout()
-                        self.swapPerformed.emit()
+                        if not getattr(cells[src], 'locked', False) and not getattr(cells[dst], 'locked', False):
+                            cells[src].image_index, cells[dst].image_index = (
+                                cells[dst].image_index, cells[src].image_index)
+                            self._sync_tree_leaves_from_layout()
+                            self.swapPerformed.emit()
                     self.refresh_preview()
                 return
             elif self._swap_circle_source >= 0:
@@ -1399,6 +1448,11 @@ class CollageCanvas(QWidget):
         if clicked >= 0:
             self.selected_cell_index = clicked
             self.cellSelected.emit(clicked)
+            cell = self.project.selected_layout.cells[clicked]
+            if getattr(cell, 'locked', False) or getattr(cell, 'fit_mode', 'fill') == 'contain':
+                self.drag_active = False
+                self.update()
+                return
             self._base_pixmap = self._build_full_pixmap(exclude_cell=clicked)
             self._drag_cell_pixmap, self._drag_cell_widget_rect = \
                 self._render_single_cell_pixmap(clicked)
@@ -1719,7 +1773,12 @@ class CollageCanvas(QWidget):
                 and self.project and self.project.selected_layout
                 and not (event.modifiers() & Qt.ShiftModifier)):
             cell = self.project.selected_layout.cells[self.selected_cell_index]
-            if cell.image_index is not None and cell.image_index < len(self.project.images):
+            if (
+                not getattr(cell, 'locked', False)
+                and getattr(cell, 'fit_mode', 'fill') != 'contain'
+                and cell.image_index is not None
+                and cell.image_index < len(self.project.images)
+            ):
                 state = self.project.images[cell.image_index]
                 state.zoom = min(5.0, max(1.0, state.zoom + (0.1 if delta_y > 0 else -0.1)))
                 self.refresh_preview()
@@ -1883,6 +1942,9 @@ class CollageCanvas(QWidget):
     def _handle_swap_click(self, idx: int) -> None:
         if idx < 0:
             return
+        cells = self.project.selected_layout.cells
+        if getattr(cells[idx], 'locked', False):
+            return
         if self._swap_source < 0:
             self._swap_source = idx
             self.selected_cell_index = idx
@@ -1890,7 +1952,12 @@ class CollageCanvas(QWidget):
         else:
             src, dst = self._swap_source, idx
             if src != dst:
-                cells = self.project.selected_layout.cells
+                if getattr(cells[src], 'locked', False) or getattr(cells[dst], 'locked', False):
+                    self._swap_source = -1
+                    self.selected_cell_index = -1
+                    self.set_swap_mode(False)
+                    self.refresh_preview()
+                    return
                 cells[src].image_index, cells[dst].image_index = \
                     cells[dst].image_index, cells[src].image_index
                 self._sync_tree_leaves_from_layout()

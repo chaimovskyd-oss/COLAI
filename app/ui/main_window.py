@@ -14,10 +14,10 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-from PySide6.QtCore import Qt, QRect, QSize, Signal, QTimer, QFileSystemWatcher, QThread
+from PySide6.QtCore import Qt, QRect, QSize, Signal, QTimer, QFileSystemWatcher, QThread, QUrl
 from PySide6.QtGui import (
     QColor, QDragEnterEvent, QDropEvent, QIcon, QKeySequence,
-    QPainter, QPen, QPixmap, QShortcut,
+    QDesktopServices, QPainter, QPen, QPixmap, QShortcut,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
@@ -59,7 +59,11 @@ from PySide6.QtWidgets import (
 
 from app.i18n import tr, set_language, current_language, is_rtl
 from app.core import face_detector
-from app.core.collage_engine import generate_suggestions, custom_grid_layout
+from app.core.collage_engine import (
+    custom_grid_layout,
+    detect_spotify_code_image,
+    generate_suggestions,
+)
 from app.core.exporter import export_album, export_project, render_project
 from app.core.shape_layouts import generate_shaped_layout
 from app.core.smart_crop_service import (
@@ -564,6 +568,50 @@ class DropListWidget(QListWidget):
 
 
 # ---------------------------------------------------------------------------
+# Album thumbnail worker — renders page thumbnails in background
+# ---------------------------------------------------------------------------
+
+class _AlbumThumbWorker(QThread):
+    """Renders tiny page previews one by one; emits (page_idx, QPixmap)."""
+
+    thumb_ready = Signal(int, object)
+
+    _THUMB_W, _THUMB_H = 86, 60
+
+    def __init__(self, session, parent=None):
+        super().__init__(parent)
+        self._session = session
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        from PIL import Image
+        from app.core.exporter import render_project
+        from app.utils.image_utils import pil_to_qpixmap
+
+        for i in range(self._session.page_count):
+            if self._cancelled:
+                return
+            try:
+                pp = self._session.make_page_project(i)
+                if pp is None or pp.selected_layout is None:
+                    continue
+                # Use very low DPI proxy for speed
+                orig_dpi = pp.settings.dpi
+                pp.settings.dpi = 72
+                img = render_project(pp)
+                pp.settings.dpi = orig_dpi
+                thumb = img.resize((self._THUMB_W, self._THUMB_H),
+                                   Image.Resampling.BILINEAR)
+                pix = pil_to_qpixmap(thumb)
+                self.thumb_ready.emit(i, pix)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Album page strip — horizontal thumbnail row at canvas bottom
 # ---------------------------------------------------------------------------
 
@@ -611,17 +659,22 @@ class _AlbumPageStrip(QWidget):
         self._btns: list = []
         self._current = 0
         self._session = None
+        self._thumb_worker = None
 
     def set_session(self, session, builder=None) -> None:
-        """Populate strip from AlbumSession. Renders placeholder thumbnails."""
+        """Populate strip with page-number placeholders, then render thumbnails async."""
+        # Cancel any running thumb worker
+        if self._thumb_worker and self._thumb_worker.isRunning():
+            self._thumb_worker.cancel()
+            self._thumb_worker.wait(500)
+
         self._session = session
-        self._builder = builder
         for btn in self._btns:
             self._row.removeWidget(btn)
             btn.deleteLater()
         self._btns.clear()
 
-        stretch = self._row.takeAt(self._row.count() - 1)
+        self._row.takeAt(self._row.count() - 1)  # remove trailing stretch
         n = session.page_count
         for i in range(n):
             btn = QPushButton(f'דף {i + 1}')
@@ -630,12 +683,13 @@ class _AlbumPageStrip(QWidget):
             btn.clicked.connect(lambda _, ix=i: self._select(ix))
             self._row.addWidget(btn)
             self._btns.append(btn)
-
-            # Set a real thumbnail in background
-            self._render_thumb_async(i, btn, session)
-
         self._row.addStretch(1)
         self._current = 0
+
+        # Kick off async thumbnail rendering (does NOT block the UI)
+        self._thumb_worker = _AlbumThumbWorker(session, self)
+        self._thumb_worker.thumb_ready.connect(self._on_thumb_ready)
+        self._thumb_worker.start()
 
     def select(self, idx: int) -> None:
         self._select(idx, emit=False)
@@ -647,21 +701,13 @@ class _AlbumPageStrip(QWidget):
         if emit:
             self.page_selected.emit(idx)
 
-    def _render_thumb_async(self, idx: int, btn: QPushButton, session) -> None:
-        """Render a tiny page thumbnail and set it as button icon (best-effort)."""
-        try:
-            page_project = session.make_page_project(idx)
-            if page_project is None or page_project.selected_layout is None:
-                return
-            from app.core.exporter import render_project
-            img = render_project(page_project)
-            thumb = img.resize((self._THUMB_W - 4, self._THUMB_H - 18), __import__('PIL').Image.Resampling.LANCZOS)
-            from app.utils.image_utils import pil_to_qpixmap
-            pix = pil_to_qpixmap(thumb)
+    def _on_thumb_ready(self, idx: int, pix) -> None:
+        """Called from background worker when a thumbnail is rendered."""
+        if 0 <= idx < len(self._btns):
+            btn = self._btns[idx]
             btn.setIcon(QIcon(pix))
-            btn.setIconSize(QSize(self._THUMB_W - 4, self._THUMB_H - 18))
-        except Exception:
-            pass  # thumbnail is optional — page number label is the fallback
+            btn.setIconSize(QSize(self._THUMB_W, self._THUMB_H - 16))
+            btn.setText('')  # hide text once thumbnail is available
 
 
 # ---------------------------------------------------------------------------
@@ -1107,6 +1153,11 @@ class MainWindow(QMainWindow):
         a['shape_heart'] = self._shape_menu.addAction('', lambda: self._generate_shaped('heart'))
         self._advanced_menu.addSeparator()
         a['dynamic_layout'] = self._advanced_menu.addAction('', self._create_dynamic_layout)
+
+        # Tools
+        self._tools_menu = mb.addMenu('&Tools')
+        a['spotify_search'] = self._tools_menu.addAction('Search Spotify song...', self._open_spotify_song_search)
+        a['spotify_codes'] = self._tools_menu.addAction('Open Spotify Codes', self._open_spotify_codes)
 
         # Actions
         self._actions_menu = mb.addMenu('&Actions')
@@ -2169,7 +2220,7 @@ class MainWindow(QMainWindow):
 
         use_analysis = self.project.settings.analysis_mode == 'scanned'
         layout_images = self.project.images if use_analysis else [
-            ImageState(path=s.path, rotation=s.rotation, analysis_status=s.analysis_status)
+            ImageState(path=s.path, asset_type=getattr(s, 'asset_type', 'photo'), rotation=s.rotation, analysis_status=s.analysis_status)
             for s in self.project.images
         ]
 
@@ -2229,7 +2280,7 @@ class MainWindow(QMainWindow):
         for cell in layout.cells:
             if not unassigned_images:
                 break
-            if cell.image_index is None:
+            if cell.image_index is None and not getattr(cell, 'locked', False):
                 cell.image_index = unassigned_images.pop(0)
         self._sync_dynamic_tree_from_cells()
 
@@ -2647,6 +2698,25 @@ class MainWindow(QMainWindow):
     def _show_help(self):
         QMessageBox.information(self, 'Shortcuts & Help', SHORTCUTS_HELP)
 
+    def _open_spotify_song_search(self) -> None:
+        query, ok = QInputDialog.getText(
+            self,
+            'Search Spotify',
+            'Song, artist, or album:',
+        )
+        if not ok:
+            return
+        query = query.strip()
+        if not query:
+            return
+        url = 'https://open.spotify.com/search/' + urllib.parse.quote(query)
+        QDesktopServices.openUrl(QUrl(url))
+        self.statusBar().showMessage('Opened Spotify search in your browser.', 4000)
+
+    def _open_spotify_codes(self) -> None:
+        QDesktopServices.openUrl(QUrl('https://www.spotifycodes.com/'))
+        self.statusBar().showMessage('Opened Spotify Codes in your browser.', 4000)
+
     def _zoom_in(self):
         self.canvas.zoom_in()
 
@@ -2754,8 +2824,11 @@ class MainWindow(QMainWindow):
             item.setIcon(self._make_thumb_icon(file, analyzed=False))
             self.image_list.addItem(item)
         if had_layout and self.project.selected_layout:
-            self._assign_new_images_to_empty_cells()
-            self.canvas.refresh_preview()
+            if self._active_special_kind() == 'spotify':
+                self._refresh_special_layout()
+            else:
+                self._assign_new_images_to_empty_cells()
+                self.canvas.refresh_preview()
             self._check_quality_warnings()
         elif not self._refresh_special_layout():
             self.generate_suggestions()
@@ -2810,6 +2883,16 @@ class MainWindow(QMainWindow):
         file = files[0]
         self.project.settings.analysis_mode = 'quick'
         new_state = ImageState(path=file, analysis_status='quick')
+        if getattr(cell, 'slot_type', 'photo') == 'spotify_code':
+            probe = [new_state]
+            if detect_spotify_code_image(probe) is None:
+                QMessageBox.information(
+                    self,
+                    'Spotify Code slot',
+                    'This reserved slot accepts only detected Spotify Code images.',
+                )
+                return
+            new_state.asset_type = 'spotify_code'
         if cell.image_index is not None and cell.image_index < len(self.project.images):
             invalidate_cache(self.project.images[cell.image_index].path)
             self.project.images[cell.image_index] = new_state
@@ -3090,6 +3173,8 @@ class MainWindow(QMainWindow):
             return 'shape'
         if getattr(lay, 'tree', None) is not None:
             return 'dynamic'
+        if any(getattr(c, 'slot_type', 'photo') == 'spotify_code' for c in getattr(lay, 'cells', [])):
+            return 'spotify'
         return ''
 
     def _refresh_special_layout(self) -> bool:
@@ -3153,6 +3238,28 @@ class MainWindow(QMainWindow):
             self.canvas.refresh_preview()
             return True
 
+        if kind == 'spotify':
+            if not self.project.images:
+                return True
+            from app.core.collage_engine import create_spotify_bottom_layout, create_spotify_center_layout
+            old_name = self.project.selected_layout.name
+            if old_name == 'Spotify Center':
+                layout = create_spotify_center_layout(
+                    self.project.settings, len(self.project.images), self.project.images)
+            else:
+                layout = create_spotify_bottom_layout(
+                    self.project.settings, len(self.project.images), self.project.images)
+            self.project.suggestions = [
+                s for s in self.project.suggestions
+                if not any(getattr(c, 'slot_type', 'photo') == 'spotify_code' for c in getattr(s, 'cells', []))
+            ]
+            self.project.suggestions.insert(0, layout)
+            self.project.selected_layout = layout
+            self._apply_face_pan_to_layout(layout)
+            self._rebuild_layout_list(select=layout)
+            self.canvas.refresh_preview()
+            return True
+
         return False
 
     def _rebuild_layout_list(self, select=None) -> None:
@@ -3211,7 +3318,7 @@ class MainWindow(QMainWindow):
             self.project.settings.analysis_mode = 'scanned'
         else:
             layout_images = [
-                ImageState(path=state.path, rotation=state.rotation, analysis_status=state.analysis_status)
+                ImageState(path=state.path, asset_type=getattr(state, 'asset_type', 'photo'), rotation=state.rotation, analysis_status=state.analysis_status)
                 for state in self.project.images
             ]
             self.project.settings.analysis_mode = 'quick'
@@ -3537,7 +3644,7 @@ class MainWindow(QMainWindow):
                 p.translate(x + w / 2, y + h / 2)
                 p.rotate(rot)
                 p.translate(-(x + w / 2), -(y + h / 2))
-            p.fillRect(x, y, w, h, colors[i % len(colors)])
+            p.fillRect(x, y, w, h, QColor('#1db954') if getattr(cell, 'slot_type', 'photo') == 'spotify_code' else colors[i % len(colors)])
             p.drawRect(x, y, w - 1, h - 1)
             if abs(rot) > 0.01:
                 p.restore()
@@ -3574,6 +3681,8 @@ class MainWindow(QMainWindow):
         if layout is None:
             return
         for cell in layout.cells:
+            if getattr(cell, 'fit_mode', 'fill') == 'contain' or getattr(cell, 'locked', False):
+                continue
             if cell.image_index is None or cell.image_index >= len(self.project.images):
                 continue
             state = self.project.images[cell.image_index]
@@ -3585,29 +3694,64 @@ class MainWindow(QMainWindow):
             return
         layout = self.project.suggestions[index]
         self.project.selected_layout = layout
-        self._apply_face_pan_to_layout(layout)   # ג† re-centre faces for this layout's cells
+
+        session = getattr(self, "_active_album_session", None)
+        if session and session.album_state and self.canvas.project:
+            # Album mode: sync layout to canvas page-view + persist to AlbumState
+            self.canvas.project.selected_layout = layout
+            cur = session.album_state.current_page_index
+            if 0 <= cur < session.album_state.page_count:
+                session.album_state.pages[cur].layout = layout
+                if hasattr(self, "_album_page_cache"):
+                    self._album_page_cache.pop(cur, None)
+                if hasattr(self, "_album_sugg_cache"):
+                    self._album_sugg_cache.pop(cur, None)
+            self._apply_face_pan_to_layout_for(layout, self.canvas.project)
+        else:
+            self._apply_face_pan_to_layout(layout)
+
         self.canvas.refresh_preview()
         self._check_quality_warnings()
         self._push_history()
+
+    def _apply_face_pan_to_layout_for(self, layout, project) -> None:
+        """Like _apply_face_pan_to_layout but uses the given project image list."""
+        for cell in layout.cells:
+            if cell.image_index is None or cell.image_index >= len(project.images):
+                continue
+            state = project.images[cell.image_index]
+            target = (max(1, int(round(cell.w))), max(1, int(round(cell.h))))
+            state.pan_x, state.pan_y = self._auto_pan(state, target)
 
     # -------------------------------------------------------------------
     # Cell / adjustment controls
     # -------------------------------------------------------------------
 
     def on_cell_selected(self, index: int):
-        if not self.project.selected_layout or index < 0:
-            self.selected_label.setText('ג€”')
+        # When album page is active on canvas, use canvas.project (page-view),
+        # not self.project (main project) — they have different image lists.
+        active_proj = (self.canvas.project
+                       if (self.canvas.project and
+                           getattr(self, '_active_album_session', None))
+                       else self.project)
+
+        if not active_proj.selected_layout or index < 0:
+            self.selected_label.setText('—')
             self._right_stack.setCurrentIndex(0)
             return
-        cell = self.project.selected_layout.cells[index]
+        cells = active_proj.selected_layout.cells
+        if index >= len(cells):
+            self._right_stack.setCurrentIndex(0)
+            return
+        cell = cells[index]
         label = f'Cell {index + 1}'
-        cell_w_mm = cell.w * 25.4 / max(1, self.project.settings.dpi)
-        cell_h_mm = cell.h * 25.4 / max(1, self.project.settings.dpi)
+        cell_w_mm = cell.w * 25.4 / max(1, active_proj.settings.dpi)
+        cell_h_mm = cell.h * 25.4 / max(1, active_proj.settings.dpi)
         label += f'\nSize: {cell_w_mm:.1f} × {cell_h_mm:.1f} mm'
         if max(cell_w_mm, cell_h_mm) >= 100.0:
             label += f'  ({cell_w_mm / 10.0:.2f} × {cell_h_mm / 10.0:.2f} cm)'
-        if cell.image_index is not None and cell.image_index < len(self.project.images):
-            state = self.project.images[cell.image_index]
+        if cell.image_index is not None and cell.image_index < len(active_proj.images):
+            state = active_proj.images[cell.image_index]
             label += f'\n{Path(state.path).name}'
             if state.face_regions:
                 label += f'  [{len(state.face_regions)} face]'
@@ -5106,48 +5250,81 @@ class MainWindow(QMainWindow):
 
     def open_album_session(self, session) -> None:
         """Receive album from wizard, open it in the main collage editor."""
-        from app.album_builder.builder import AlbumBuilder
         self._active_album_session = session
-        self._active_album_builder = AlbumBuilder.__new__(AlbumBuilder)
-        self._active_album_builder.project = session.make_preview_project()
-        self._active_album_builder.project.images = list(session.image_states)
+        # Per-session caches — cleared each time a new album is opened
+        self._album_page_cache: dict = {}   # idx → ProjectState (page-view)
+        self._album_sugg_cache: dict = {}   # idx → List[LayoutSuggestion]
+        self._pending_album_page: int = 0
+
+        # Debounce timer for rapid page switching
+        if not hasattr(self, '_album_page_timer'):
+            self._album_page_timer = QTimer(self)
+            self._album_page_timer.setSingleShot(True)
+            self._album_page_timer.timeout.connect(self._flush_album_page)
+
+        # Lower canvas preview resolution for album (faster page switches)
+        self.canvas._fast_preview_max = 900
 
         # Switch back to main view
         self._album_mode_btn.setChecked(False)
         self._central_stack.setCurrentIndex(0)
 
-        # Show page strip
+        # Show page strip (thumbnails rendered async)
         self._album_strip.set_session(session)
         self._album_strip.show()
 
-        # Show first page
+        # Show first page immediately
         self._show_main_album_page(0)
 
     def _on_album_strip_page(self, idx: int) -> None:
-        self._show_main_album_page(idx)
+        session = getattr(self, '_active_album_session', None)
+        if session is None:
+            return
+        # Update state + strip selection immediately (no render yet)
+        if session.album_state:
+            session.album_state.current_page_index = idx
+        self._album_strip.select(idx)
+        self._pending_album_page = idx
+        # Debounce: wait 60 ms before rendering (absorbs rapid clicks)
+        if hasattr(self, '_album_page_timer'):
+            self._album_page_timer.start(60)
+        else:
+            self._show_main_album_page(idx)
+
+    def _flush_album_page(self) -> None:
+        self._show_main_album_page(self._pending_album_page)
 
     def _show_main_album_page(self, idx: int) -> None:
         session = getattr(self, '_active_album_session', None)
         if session is None:
             return
-        page_project = session.make_page_project(idx)
+
+        # Use cached page-view ProjectState when possible
+        page_project = self._album_page_cache.get(idx)
         if page_project is None:
-            return
+            page_project = session.make_page_project(idx)
+            if page_project is None:
+                return
+            self._album_page_cache[idx] = page_project
+
         if session.album_state:
             session.album_state.current_page_index = idx
 
-        # Populate layout suggestions for this page
-        page_project.suggestions = self._get_page_suggestions(page_project, idx)
+        # Use cached layout suggestions (generated lazily on first visit)
+        if idx not in self._album_sugg_cache:
+            self._album_sugg_cache[idx] = self._get_page_suggestions(page_project, idx)
+        suggs = self._album_sugg_cache[idx]
+        page_project.suggestions = suggs
+
+        # CRITICAL: keep self.project in sync so the right panel
+        # (_rebuild_layout_list uses self.project.suggestions) shows page options
+        self.project.suggestions = suggs
+        self.project.selected_layout = page_project.selected_layout
 
         self.canvas.project = page_project
         self.canvas.refresh_preview()
         self._album_strip.select(idx)
-
-        # Update right-panel suggestion list with alternatives for this page
-        self._rebuild_layout_list()
-
-        # Track in project for undo
-        self._push_history()
+        self._rebuild_layout_list(select=page_project.selected_layout)
 
     def _get_page_suggestions(self, page_project, page_idx):
         """Generate layout alternatives for the current page."""
@@ -5170,6 +5347,7 @@ class MainWindow(QMainWindow):
         """Remove album strip and return canvas to normal single-collage mode."""
         self._active_album_session = None
         self._album_strip.hide()
+        self.canvas._fast_preview_max = 1400  # restore full quality
         self.canvas.project = self.project
         self.canvas.refresh_preview()
 
