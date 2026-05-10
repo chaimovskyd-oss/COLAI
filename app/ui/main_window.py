@@ -5,9 +5,12 @@ from typing import Dict, List, Optional, Tuple
 import concurrent.futures
 import copy
 import json
+import logging
 import os
 import re
+import struct
 import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -251,6 +254,167 @@ class CollapsibleSection(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Windows virtual file (drag-drop) helpers
+# ---------------------------------------------------------------------------
+
+def _detect_image_type_from_bytes(data: bytes) -> Optional[str]:
+    """Detect image type from file magic bytes.
+
+    Returns: 'png', 'jpg', 'webp', 'bmp', or None if not recognized.
+    """
+    if len(data) < 4:
+        return None
+
+    # PNG: 89 50 4E 47
+    if data[:4] == b'\x89PNG':
+        return 'png'
+
+    # JPEG: FF D8 FF
+    if data[:3] == b'\xff\xd8\xff':
+        return 'jpg'
+
+    # WEBP: check for RIFF...WEBP signature
+    if data[:4] == b'RIFF' and len(data) >= 12 and data[8:12] == b'WEBP':
+        return 'webp'
+
+    # BMP: BM (0x42 0x4D)
+    if data[:2] == b'BM':
+        return 'bmp'
+
+    return None
+
+
+def _parse_file_group_descriptor_w(descriptor_data: bytes) -> Optional[str]:
+    """Parse Windows FileGroupDescriptorW to extract filename.
+
+    FileGroupDescriptorW is a binary structure:
+    - UINT cItems (4 bytes, little-endian): number of files
+    - FILEDESCRIPTOR[cItems]: array of file descriptors
+
+    FILEDESCRIPTOR structure (per file):
+    - DWORD dwFileAttributes (4 bytes)
+    - FILETIME ftCreationTime (8 bytes)
+    - FILETIME ftLastAccessTime (8 bytes)
+    - FILETIME ftLastWriteTime (8 bytes)
+    - DWORD nFileSizeHigh (4 bytes)
+    - DWORD nFileSizeLow (4 bytes)
+    - WCHAR cFileName[260] (520 bytes, UTF-16LE wide string)
+
+    Total per descriptor: 44 + 520 = 564 bytes
+    The filename starts at offset 44 within each descriptor.
+    """
+    if len(descriptor_data) < 4:
+        return None
+
+    try:
+        # Read number of files
+        cItems = struct.unpack('<I', descriptor_data[:4])[0]
+        print(f"[DEBUG] FileGroupDescriptorW contains {cItems} file(s)")
+
+        if cItems < 1 or len(descriptor_data) < 4 + 44:
+            return None
+
+        # Get first file descriptor (offset 4, skip cItems)
+        # Filename is at offset 44 within the descriptor (relative to descriptor start)
+        filename_offset = 4 + 44
+        if len(descriptor_data) < filename_offset + 520:
+            return None
+
+        # Read the wide-string filename (UTF-16LE, null-terminated)
+        # Maximum 260 characters = 520 bytes
+        filename_raw = descriptor_data[filename_offset:filename_offset + 520]
+
+        # Decode as UTF-16LE and extract until first null terminator
+        try:
+            filename_str = filename_raw.decode('utf-16-le').split('\0')[0]
+            if filename_str:
+                print(f"[DEBUG] Extracted virtual filename from descriptor: {filename_str}")
+                return filename_str
+        except (UnicodeDecodeError, IndexError):
+            pass
+
+    except Exception as e:
+        print(f"[DEBUG] Error parsing FileGroupDescriptorW: {e}")
+
+    return None
+
+
+def _save_virtual_file_to_temp(filename: Optional[str], file_bytes: bytes) -> Optional[str]:
+    """Save virtual file bytes to temp directory with safe filename.
+
+    Creates temp/hadish_collage_drops/ directory and saves the file there.
+    Detects image type from magic bytes if extension is not valid.
+
+    Returns: path to saved file, or None on error.
+    """
+    if not file_bytes:
+        print("[DEBUG] No file bytes to save")
+        return None
+
+    try:
+        # Create base temp directory
+        temp_base = Path(tempfile.gettempdir()) / 'hadish_collage_drops'
+        temp_base.mkdir(exist_ok=True, parents=True)
+        print(f"[DEBUG] Using temp directory: {temp_base}")
+
+        # Determine extension
+        extension = None
+        safe_name = 'image'
+
+        if filename:
+            # Try to use the extracted filename's extension
+            name_with_ext = Path(filename).name
+            file_ext = Path(filename).suffix.lower()
+
+            # Check if extension looks like an image format
+            if file_ext in {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}:
+                extension = file_ext[1:]  # Remove leading dot
+                safe_name = name_with_ext.replace('\\', '_').replace('/', '_')[:255]
+            else:
+                # Extension not recognized, try to detect from bytes
+                detected = _detect_image_type_from_bytes(file_bytes)
+                if detected:
+                    extension = detected
+                    safe_name = Path(filename).stem if filename else 'image'
+                else:
+                    print(f"[DEBUG] Could not determine image type for: {filename}")
+                    return None
+
+        if not extension:
+            # No filename or couldn't determine type; try magic bytes
+            detected = _detect_image_type_from_bytes(file_bytes)
+            if detected:
+                extension = detected
+            else:
+                print("[DEBUG] Could not detect image type from file magic bytes")
+                return None
+
+        # Save to temp file
+        temp_file_path = temp_base / f"{safe_name}.{extension}"
+
+        # Avoid collisions
+        counter = 1
+        original_path = temp_file_path
+        while temp_file_path.exists():
+            stem = original_path.stem
+            temp_file_path = temp_base / f"{stem}_{counter}.{extension}"
+            counter += 1
+
+        # Write file
+        with open(temp_file_path, 'wb') as f:
+            f.write(file_bytes)
+
+        print(f"[DEBUG] Saved virtual file to: {temp_file_path}")
+        print(f"[DEBUG] File size: {len(file_bytes)} bytes")
+
+        return str(temp_file_path)
+
+    except Exception as e:
+        print(f"[DEBUG] Error saving virtual file: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Image list with drag-drop thumbnails
 # ---------------------------------------------------------------------------
 
@@ -268,19 +432,213 @@ class DropListWidget(QListWidget):
         self.setMovement(QListWidget.Static)
         self.setWordWrap(True)
 
+    def _can_accept_drop(self, mime_data) -> bool:
+        """Check if mimeData contains acceptable image content."""
+        # Check for file URLs
+        if mime_data.hasUrls():
+            return True
+        # Check for image data (e.g., from WhatsApp, clipboard)
+        if mime_data.hasImage():
+            return True
+        # Check for Windows virtual files (WhatsApp on Windows)
+        formats = mime_data.formats()
+        windows_virtual_mimes = {
+            'application/x-qt-windows-mime;value="FileGroupDescriptorW"',
+            'application/x-qt-windows-mime;value="FileContents"'
+        }
+        if any(fmt in windows_virtual_mimes for fmt in formats):
+            return True
+        # Check for known image MIME formats
+        image_mimes = {'image/png', 'image/jpeg', 'image/bmp', 'image/webp',
+                       'image/x-windows-bmp'}
+        return any(fmt in image_mimes for fmt in formats)
+
+    def _extract_image_from_mime_data(self, mime_data) -> Optional[str]:
+        """Extract image data from MIME payload and save to temporary file."""
+        from PySide6.QtGui import QImage
+
+        image = None
+
+        if mime_data.hasImage():
+            try:
+                image_variant = mime_data.imageData()
+                if image_variant and isinstance(image_variant, QImage):
+                    image = image_variant
+            except Exception as e:
+                print(f"[DEBUG] Failed to extract image via imageData(): {e}")
+
+        if image is None:
+            formats = mime_data.formats()
+            for fmt in formats:
+                if fmt.startswith('image/'):
+                    try:
+                        data = mime_data.data(fmt)
+                        if data and len(data) > 0:
+                            image = QImage()
+                            if image.loadFromData(data):
+                                print(f"[DEBUG] Loaded image from MIME format '{fmt}'")
+                                break
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to load from MIME format '{fmt}': {e}")
+
+        if image and not image.isNull():
+            try:
+                temp_file = tempfile.NamedTemporaryFile(
+                    suffix='.png', delete=False, dir=None
+                )
+                temp_path = temp_file.name
+                temp_file.close()
+
+                if image.save(temp_path, 'PNG'):
+                    print(f"[DEBUG] Saved image from drop to temporary file: {temp_path}")
+                    return temp_path
+                else:
+                    os.unlink(temp_path)
+            except Exception as e:
+                print(f"[DEBUG] Error saving image to temporary file: {e}")
+
+        return None
+
     def dragEnterEvent(self, e: QDragEnterEvent):
-        if e.mimeData().hasUrls():
+        if self._can_accept_drop(e.mimeData()):
             e.acceptProposedAction()
+        else:
+            formats = e.mimeData().formats()
+            print(f"[DEBUG] Drop rejected in DropListWidget. Available MIME formats: {formats}")
+            e.ignore()
 
     def dragMoveEvent(self, e):
-        if e.mimeData().hasUrls():
+        if self._can_accept_drop(e.mimeData()):
             e.acceptProposedAction()
+        else:
+            e.ignore()
 
     def dropEvent(self, e: QDropEvent):
-        files = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile()]
+        mime_data = e.mimeData()
+        files = []
+
+        # Log all available MIME formats
+        formats = mime_data.formats()
+        print(f"[DEBUG] DropListWidget received drop with MIME formats: {formats}")
+
+        # First, try to extract file paths from URLs
+        if mime_data.hasUrls():
+            files = [u.toLocalFile() for u in mime_data.urls() if u.toLocalFile()]
+            if files:
+                print(f"[DEBUG] Extracted {len(files)} file(s) from URLs")
+
+        # If no valid file paths, try Windows virtual files (WhatsApp)
+        if not files:
+            descriptor_mime = 'application/x-qt-windows-mime;value="FileGroupDescriptorW"'
+            contents_mime = 'application/x-qt-windows-mime;value="FileContents"'
+
+            if descriptor_mime in formats and contents_mime in formats:
+                try:
+                    # Parse the descriptor to get filename
+                    descriptor_data = mime_data.data(descriptor_mime)
+                    filename = _parse_file_group_descriptor_w(descriptor_data)
+
+                    # Read the file contents
+                    file_contents = mime_data.data(contents_mime)
+                    if file_contents:
+                        print(f"[DEBUG] Read {len(file_contents)} bytes from FileContents")
+                        # Save to temp directory
+                        temp_file = _save_virtual_file_to_temp(filename, file_contents)
+                        if temp_file:
+                            files = [temp_file]
+                except Exception as e:
+                    print(f"[DEBUG] Error extracting Windows virtual file: {e}")
+
+        # If no files yet, try image data
+        if not files:
+            temp_file = self._extract_image_from_mime_data(mime_data)
+            if temp_file:
+                files = [temp_file]
+            else:
+                print(f"[DEBUG] No image extracted in DropListWidget")
+
         if files:
             self.filesDropped.emit(files)
         e.acceptProposedAction()
+
+
+# ---------------------------------------------------------------------------
+# Toast — progress notification for depth operations
+# ---------------------------------------------------------------------------
+
+class _DepthToast(QWidget):
+    """Floating progress banner pinned to the top of the canvas frame."""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setFixedHeight(60)
+        self.setStyleSheet(
+            'background:#0d2137; border-bottom:2px solid #4a9eff;'
+        )
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(16, 0, 16, 0)
+        root.setSpacing(14)
+
+        icon = QLabel('⚡')
+        icon.setStyleSheet('color:#4a9eff; font-size:22px; background:transparent;')
+        icon.setFixedWidth(28)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        text_col.setContentsMargins(0, 0, 0, 0)
+
+        self._title_lbl = QLabel('מעבד...')
+        self._title_lbl.setStyleSheet(
+            'color:#ffffff; font-weight:bold; font-size:13px; background:transparent;'
+        )
+        self._status_lbl = QLabel('')
+        self._status_lbl.setStyleSheet(
+            'color:#7aafe0; font-size:11px; background:transparent;'
+        )
+        text_col.addWidget(self._title_lbl)
+        text_col.addWidget(self._status_lbl)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setFixedWidth(200)
+        self._bar.setFixedHeight(10)
+        self._bar.setTextVisible(False)
+        self._bar.setStyleSheet(
+            'QProgressBar{background:#1a3a5c;border-radius:5px;border:none;}'
+            'QProgressBar::chunk{'
+            '  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,'
+            '    stop:0 #4a9eff,stop:1 #00d4ff);'
+            '  border-radius:5px;}'
+        )
+
+        root.addWidget(icon)
+        root.addLayout(text_col, 1)
+        root.addWidget(self._bar, 0, Qt.AlignVCenter)
+
+    def show_operation(self, title: str) -> None:
+        self._title_lbl.setText(title)
+        self._status_lbl.setText('מאתחל מודל...')
+        self._bar.setValue(0)
+        self._reposition()
+        self.show()
+        self.raise_()
+
+    def update_progress(self, title: str, status: str, pct: int) -> None:
+        self._title_lbl.setText(title)
+        self._status_lbl.setText(status)
+        self._bar.setValue(max(0, min(100, pct)))
+
+    def _reposition(self) -> None:
+        p = self.parent()
+        if p:
+            self.setFixedWidth(p.width())
+            self.move(0, 0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reposition()
 
 
 # ---------------------------------------------------------------------------
@@ -413,24 +771,154 @@ class MainWindow(QMainWindow):
 
     _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
 
+    def _can_accept_drop(self, mime_data) -> bool:
+        """Check if mimeData contains acceptable image content."""
+        # Check for file URLs with image extensions
+        if mime_data.hasUrls():
+            urls = mime_data.urls()
+            if any(Path(u.toLocalFile()).suffix.lower() in self._IMAGE_EXTS
+                   for u in urls):
+                return True
+
+        # Check for image data (e.g., from WhatsApp, clipboard)
+        if mime_data.hasImage():
+            return True
+
+        # Check for Windows virtual files (WhatsApp on Windows)
+        formats = mime_data.formats()
+        windows_virtual_mimes = {
+            'application/x-qt-windows-mime;value="FileGroupDescriptorW"',
+            'application/x-qt-windows-mime;value="FileContents"'
+        }
+        if any(fmt in windows_virtual_mimes for fmt in formats):
+            return True
+
+        # Check for known image MIME formats
+        image_mimes = {'image/png', 'image/jpeg', 'image/bmp', 'image/webp',
+                       'image/x-windows-bmp'}
+        if any(fmt in image_mimes for fmt in formats):
+            return True
+
+        return False
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls() and any(
-            Path(u.toLocalFile()).suffix.lower() in self._IMAGE_EXTS
-            for u in event.mimeData().urls()
-        ):
+        if self._can_accept_drop(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            # Log what we got for debugging
+            formats = event.mimeData().formats()
+            print(f"[DEBUG] Drop rejected. Available MIME formats: {formats}")
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._can_accept_drop(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
-    def dragMoveEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+    def _extract_image_from_mime_data(self, mime_data, source_name: str = "drop") -> Optional[str]:
+        """Extract image data from MIME payload and save to temporary file.
+
+        Returns path to temporary PNG file, or None if no image data found.
+        """
+        from PySide6.QtGui import QImage
+
+        image = None
+
+        # Try to get image data directly (hasImage returns true for clipboard-style data)
+        if mime_data.hasImage():
+            try:
+                image_variant = mime_data.imageData()
+                if image_variant and isinstance(image_variant, QImage):
+                    image = image_variant
+            except Exception as e:
+                print(f"[DEBUG] Failed to extract image via imageData(): {e}")
+
+        # Try to get image from data property if we haven't found it yet
+        if image is None:
+            formats = mime_data.formats()
+            for fmt in formats:
+                if fmt.startswith('image/'):
+                    try:
+                        data = mime_data.data(fmt)
+                        if data and len(data) > 0:
+                            image = QImage()
+                            if image.loadFromData(data):
+                                print(f"[DEBUG] Loaded image from MIME format '{fmt}'")
+                                break
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to load from MIME format '{fmt}': {e}")
+
+        # If we got an image, save it to a temporary PNG file
+        if image and not image.isNull():
+            try:
+                # Create temporary file with .png extension
+                temp_file = tempfile.NamedTemporaryFile(
+                    suffix='.png', delete=False, dir=None
+                )
+                temp_path = temp_file.name
+                temp_file.close()
+
+                # Save the image
+                if image.save(temp_path, 'PNG'):
+                    print(f"[DEBUG] Saved image from {source_name} to temporary file: {temp_path}")
+                    return temp_path
+                else:
+                    print(f"[DEBUG] Failed to save image to {temp_path}")
+                    os.unlink(temp_path)
+            except Exception as e:
+                print(f"[DEBUG] Error saving image to temporary file: {e}")
+
+        return None
 
     def dropEvent(self, event: QDropEvent) -> None:
-        files = [u.toLocalFile() for u in event.mimeData().urls()
-                 if Path(u.toLocalFile()).suffix.lower() in self._IMAGE_EXTS]
+        mime_data = event.mimeData()
+        files = []
+
+        # Log all available MIME formats
+        formats = mime_data.formats()
+        print(f"[DEBUG] MainWindow received drop with MIME formats: {formats}")
+
+        # First, try to extract file paths from URLs
+        if mime_data.hasUrls():
+            files = [u.toLocalFile() for u in mime_data.urls()
+                     if Path(u.toLocalFile()).suffix.lower() in self._IMAGE_EXTS]
+            if files:
+                print(f"[DEBUG] Extracted {len(files)} file(s) from URLs")
+
+        # If no valid file paths, try Windows virtual files (WhatsApp)
+        if not files:
+            descriptor_mime = 'application/x-qt-windows-mime;value="FileGroupDescriptorW"'
+            contents_mime = 'application/x-qt-windows-mime;value="FileContents"'
+
+            if descriptor_mime in formats and contents_mime in formats:
+                try:
+                    # Parse the descriptor to get filename
+                    descriptor_data = mime_data.data(descriptor_mime)
+                    filename = _parse_file_group_descriptor_w(descriptor_data)
+
+                    # Read the file contents
+                    file_contents = mime_data.data(contents_mime)
+                    if file_contents:
+                        print(f"[DEBUG] Read {len(file_contents)} bytes from FileContents")
+                        # Save to temp directory
+                        temp_file = _save_virtual_file_to_temp(filename, file_contents)
+                        if temp_file:
+                            files = [temp_file]
+                except Exception as e:
+                    print(f"[DEBUG] Error extracting Windows virtual file: {e}")
+
+        # If no files yet, try image data
+        if not files:
+            temp_file = self._extract_image_from_mime_data(mime_data, source_name="drag-drop")
+            if temp_file:
+                files = [temp_file]
+            else:
+                print(f"[DEBUG] No image extracted from MainWindow drop")
+
         if files:
             self.add_images(files)
+
         event.acceptProposedAction()
 
     # -------------------------------------------------------------------
@@ -574,6 +1062,12 @@ class MainWindow(QMainWindow):
         self._cvscroll.setFixedWidth(14)
         self._cvscroll.hide()
         crow.addWidget(self._cvscroll)
+
+        # Depth progress toast — pinned above the canvas, hidden by default
+        self._depth_toast = _DepthToast(frame)
+        self._depth_toast.hide()
+        self._depth_toast.raise_()
+
         vlay.addWidget(canvas_row, 1)
 
         # horizontal scrollbar
@@ -1782,7 +2276,8 @@ class MainWindow(QMainWindow):
             return
 
         self.depth_smart_crop_btn.setEnabled(False)
-        self.depth_smart_crop_btn.setText('מנתח תמונות...')
+        self.depth_smart_crop_btn.setText('מנתח...')
+        self._depth_toast.show_operation('קרופ חכם — ניתוח עומק תמונות')
 
         self._depth_worker = _DepthSmartCropWorker(self.project, self)
         self._depth_worker.progress.connect(self._on_depth_smart_crop_progress)
@@ -1790,9 +2285,16 @@ class MainWindow(QMainWindow):
         self._depth_worker.start()
 
     def _on_depth_smart_crop_progress(self, current: int, total: int) -> None:
-        self.depth_smart_crop_btn.setText(f'מעבד {current} מתוך {total}...')
+        pct = int(100 * current / max(1, total))
+        self._depth_toast.update_progress(
+            'קרופ חכם — ניתוח עומק תמונות',
+            f'מעבד תמונה {current} מתוך {total}',
+            pct,
+        )
+        self.depth_smart_crop_btn.setText(f'{current}/{total}')
 
     def _on_depth_smart_crop_done(self) -> None:
+        self._depth_toast.hide()
         self.depth_smart_crop_btn.setText('קרופ חכם')
         self.depth_smart_crop_btn.setEnabled(True)
         self.canvas.refresh_preview()
@@ -4435,6 +4937,11 @@ class MainWindow(QMainWindow):
             return
         self.history_index += 1
         self._restore_snapshot(self.history[self.history_index])
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_depth_toast') and self._depth_toast.isVisible():
+            self._depth_toast._reposition()
 
     def closeEvent(self, event):
         from app.core.depth_service import release_depth_model

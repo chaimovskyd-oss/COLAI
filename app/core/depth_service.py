@@ -223,97 +223,39 @@ def compute_smart_crop_pan(
 
 
 # ─── Feature 2: חפיפת עומק (Depth Overlap) ───────────────────────────────────
+#
+# גישה: שליטה ב-Z-order + הרחבה עדינה דרך מנגנון ה-fade הקיים.
+# תאים עם ניקוד עומק גבוה (קדמי) מקבלים z_index גבוה יותר ורנדרינג מורחב
+# מעט מעבר לגבולות התא — עם feather מלא על אזור ההרחבה.
+# כך התא הקדמי נראה "לפנים" ללא כפילות ו-ghost כלל.
 
-def extract_foreground_mask(
-    depth_cell: np.ndarray,
-    threshold: float = 160 / 255,
-    feather_px: int = 7,
-) -> np.ndarray:
-    """Return float32 foreground mask [0..1] from a cell-sized depth map.
 
-    Morphological cleanup removes small islands; Gaussian feather smooths edges.
+def compute_depth_z_boost(score: float) -> int:
+    """Return additional z_index (0–5) for a cell based on its depth score.
+
+    Cells with score > 0.5 (foreground) render on top of background cells.
     """
-    mask = (depth_cell > threshold).astype(np.uint8) * 255
-
-    if _CV2_AVAILABLE and _cv2 is not None:
-        kernel = _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (11, 11))
-        mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN, kernel)
-        mask = _cv2.morphologyEx(mask, _cv2.MORPH_CLOSE, kernel)
-        if feather_px > 0:
-            mask_f = mask.astype(np.float32) / 255.0
-            mask_f = _cv2.GaussianBlur(mask_f, (0, 0), float(feather_px))
-            return np.clip(mask_f, 0.0, 1.0)
-
-    return mask.astype(np.float32) / 255.0
+    if score <= 0.5:
+        return 0
+    return min(5, int((score - 0.5) * 10))
 
 
-def compute_overlap_amount(depth_cell: np.ndarray, cell_w: int, intensity: float = 0.5) -> int:
-    """Return overlap pixels (8–15% of cell_w) scaled by foreground prominence + intensity."""
-    fg_ratio = float((depth_cell > (160 / 255)).mean())
-    base = 0.08
-    extra = 0.07 * min(1.0, fg_ratio * 2.0)
-    pct = (base + extra) * float(np.clip(intensity, 0.0, 1.0))
-    return int(round(cell_w * min(0.15, max(0.0, pct))))
+def compute_depth_expand_px(
+    score: float,
+    cell_min_dim: int,
+    intensity: float = 0.5,
+) -> int:
+    """Return soft-expansion in pixels (0–3% of cell_min_dim) for foreground cells.
 
-
-def composite_depth_overlap(
-    canvas: Image.Image,
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    cell_img: Image.Image,
-    depth_cell: np.ndarray,
-    intensity: float,
-) -> Image.Image:
-    """Composite foreground subject beyond (x, y, w, h) cell boundary.
-
-    Expands paste region by overlap_px on each side (clamped to canvas edges).
-    The overflow area uses a feathered mask for natural blending.
+    The expansion is added to fade_padding and rendered with full feathering,
+    so it creates a natural edge bleed — not a hard duplicate of the subject.
+    Maximum 3% ensures it is subtle and never overwhelming.
     """
-    fg_mask = extract_foreground_mask(depth_cell, threshold=160 / 255, feather_px=5)
-    overlap_px = compute_overlap_amount(depth_cell, w, intensity)
-    if overlap_px <= 0:
-        return canvas
-
-    cw, ch = canvas.size
-    px0 = max(0, x - overlap_px)
-    py0 = max(0, y - overlap_px)
-    px1 = min(cw, x + w + overlap_px)
-    py1 = min(ch, y + h + overlap_px)
-    ext_w, ext_h = px1 - px0, py1 - py0
-    if ext_w <= 0 or ext_h <= 0:
-        return canvas
-
-    ext_img = cell_img.resize((ext_w, ext_h), Image.Resampling.LANCZOS)
-    ext_mask = np.array(
-        Image.fromarray((fg_mask * 255).astype(np.uint8)).resize(
-            (ext_w, ext_h), Image.Resampling.BILINEAR
-        ),
-        dtype=np.float32,
-    ) / 255.0
-
-    # Feather only the overflow regions (5 px ramp)
-    feather = 5
-    dl = x - px0          # expansion on left
-    dt = y - py0          # expansion on top
-    dr = px1 - (x + w)   # expansion on right
-    db = py1 - (y + h)   # expansion on bottom
-    for i in range(min(feather, dl)):
-        ext_mask[:, i] *= (i + 1) / (feather + 1)
-    for i in range(min(feather, dt)):
-        ext_mask[i, :] *= (i + 1) / (feather + 1)
-    for i in range(min(feather, dr)):
-        ext_mask[:, ext_w - 1 - i] *= (i + 1) / (feather + 1)
-    for i in range(min(feather, db)):
-        ext_mask[ext_h - 1 - i, :] *= (i + 1) / (feather + 1)
-
-    mask_pil = Image.fromarray(np.clip(ext_mask * 255, 0, 255).astype(np.uint8), "L")
-    ext_rgba = ext_img.convert("RGBA")
-    ext_rgba.putalpha(mask_pil)
-    canvas = canvas.convert("RGBA")
-    canvas.paste(ext_rgba, (px0, py0), mask_pil)
-    return canvas
+    if score <= 0.5:
+        return 0
+    # Scale: score 0.5→1.0 maps to 0%→3%, then modulated by intensity
+    pct = (score - 0.5) * 0.06 * float(np.clip(intensity, 0.0, 1.0))
+    return max(0, int(round(cell_min_dim * min(0.03, pct))))
 
 
 # ─── Feature 3: שכבות עומק (Depth Layers) ────────────────────────────────────

@@ -457,9 +457,51 @@ class CollageCanvas(QWidget):
         is_shaped = bool(layout and getattr(layout, 'shape', ''))
 
         if layout:
+            # חפיפת עומק: pre-compute z-boosts and expansions for preview render
+            _dz_preview: dict = {}   # cell_index → extra z
+            _dexp_preview: dict = {} # cell_index → expand_px
+            if (
+                getattr(settings, 'depth_overlap_enabled', False)
+                and not getattr(layout, 'shape', '')
+            ):
+                try:
+                    from app.core.depth_service import (
+                        compute_depth_map, average_depth_score,
+                        compute_depth_z_boost, compute_depth_expand_px,
+                    )
+                    from PIL import ImageOps as _IOS
+                    _ov_int = float(getattr(settings, 'depth_overlap_intensity', 0.5))
+                    for _ci, _c in enumerate(layout.cells):
+                        if _c.image_index is None or _c.image_index >= len(self.project.images):
+                            continue
+                        _st2 = self.project.images[_c.image_index]
+                        if not _st2.path:
+                            continue
+                        try:
+                            with Image.open(_st2.path) as _r2:
+                                _th2 = _IOS.exif_transpose(_r2).convert('RGB')
+                                _th2.thumbnail((256, 256), Image.Resampling.BILINEAR)
+                            _dm2 = compute_depth_map(_th2, _st2.path)
+                            if _dm2 is not None:
+                                _sc2 = average_depth_score(_dm2)
+                                _dz_preview[_ci] = compute_depth_z_boost(_sc2)
+                                _cdim = max(1, int(min(
+                                    round(_c.w * sx), round(_c.h * sy)
+                                )))
+                                _dexp_preview[_ci] = compute_depth_expand_px(
+                                    _sc2, _cdim, _ov_int
+                                )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
             draw_items = sorted(
                 enumerate(layout.cells),
-                key=lambda item: (int(getattr(item[1], 'z_index', 0)), item[0]),
+                key=lambda item: (
+                    int(getattr(item[1], 'z_index', 0)) + _dz_preview.get(item[0], 0),
+                    item[0],
+                ),
             )
             for idx, cell in draw_items:
                 x = int(round(cell.x * sx))
@@ -487,6 +529,10 @@ class CollageCanvas(QWidget):
                         crop   = fit_crop_box(cached.size, (w,h), state.pan_x, state.pan_y, render_zoom,
                                               clamp=clamp_crop)
                         fade_padding = self._cell_render_padding(cell, render_w, render_h)
+                        # חפיפת עומק: soft expansion for foreground cells (preview)
+                        _exp2 = _dexp_preview.get(idx, 0)
+                        if _exp2 > 0:
+                            fade_padding = tuple(fade_padding[i] + _exp2 for i in range(4))
                         if any(fade_padding):
                             env_w = render_w + fade_padding[0] + fade_padding[2]
                             env_h = render_h + fade_padding[1] + fade_padding[3]
@@ -583,63 +629,8 @@ class CollageCanvas(QWidget):
             from app.utils.image_utils import apply_shape_mask
             canvas = apply_shape_mask(canvas, layout.shape, settings, scale=scale)
 
-        # חפיפת עומק — second pass (preview, low-res depth maps)
-        if (
-            layout
-            and getattr(settings, 'depth_overlap_enabled', False)
-            and not getattr(layout, 'shape', '')
-        ):
-            try:
-                import numpy as _np
-                from PIL import ImageOps as _IOS
-                from app.core.depth_service import (
-                    compute_depth_map, composite_depth_overlap, average_depth_score,
-                )
-                from app.utils.image_utils import fit_crop_box as _fcb
-                _intensity = getattr(settings, 'depth_overlap_intensity', 0.5)
-                _scored = []
-                for _cell in layout.cells:
-                    if _cell.image_index is None or _cell.image_index >= len(self.project.images):
-                        continue
-                    _st = self.project.images[_cell.image_index]
-                    if not _st.path:
-                        continue
-                    try:
-                        with Image.open(_st.path) as _r:
-                            _th = _IOS.exif_transpose(_r).convert('RGB')
-                            _th.thumbnail((256, 256), Image.Resampling.BILINEAR)
-                        _dm = compute_depth_map(_th, _st.path)
-                        if _dm is not None:
-                            _scored.append((average_depth_score(_dm), _cell, _st, _dm))
-                    except Exception:
-                        pass
-                _scored.sort(key=lambda t: t[0])
-                for _score, _cell, _st, _dm in _scored:
-                    _x = int(round(_cell.x * sx))
-                    _y = int(round(_cell.y * sy))
-                    _w = max(1, int(round(_cell.w * sx)))
-                    _h = max(1, int(round(_cell.h * sy)))
-                    try:
-                        _cached = get_preview_image(_st.path, _st.rotation)
-                        _crop = _fcb(_cached.size, (_w, _h), _st.pan_x, _st.pan_y,
-                                     max(1.0, float(getattr(_st, 'zoom', 1.0))))
-                        _cimg = _cached.crop(_crop).resize((_w, _h), Image.Resampling.BILINEAR)
-                        _depth_cell = _np.array(
-                            Image.fromarray((_dm * 255).astype(_np.uint8)).resize(
-                                (_w, _h), Image.Resampling.BILINEAR
-                            )
-                        ).astype(_np.float32) / 255.0
-                        canvas = composite_depth_overlap(
-                            canvas, _x, _y, _w, _h, _cimg, _depth_cell, _intensity
-                        )
-                    except Exception:
-                        pass
-                if canvas.mode == 'RGBA':
-                    _bg = Image.new('RGB', canvas.size, settings.background_rgb)
-                    _bg.paste(canvas, mask=canvas.split()[3])
-                    canvas = _bg
-            except Exception:
-                pass
+        # חפיפת עומק: Z-order + soft expansion handled inside the main render loop above.
+        # No second pass required.
 
         return canvas, pw, ph, sx, sy
 

@@ -86,9 +86,37 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
         except ImportError:
             _depth_enabled = False
 
+    # חפיפת עומק: pre-compute z-boost and soft-expansion per cell index
+    _depth_z: dict = {}    # cell_index → extra z_index (foreground renders on top)
+    _depth_exp: dict = {}  # cell_index → expand_px added to fade_padding
+    if _depth_enabled and getattr(settings, 'depth_overlap_enabled', False):
+        try:
+            from app.core.depth_service import (
+                average_depth_score, compute_depth_z_boost, compute_depth_expand_px,
+            )
+            _ov_intensity = float(getattr(settings, 'depth_overlap_intensity', 0.5))
+            for _ci, _cell in enumerate(layout.cells):
+                if _cell.image_index is None or _cell.image_index >= len(project.images):
+                    continue
+                _dm = _depth_maps.get(project.images[_cell.image_index].path)
+                if _dm is None:
+                    continue
+                _sc = average_depth_score(_dm)
+                _depth_z[_ci] = compute_depth_z_boost(_sc)
+                _depth_exp[_ci] = compute_depth_expand_px(
+                    _sc,
+                    max(1, int(min(round(_cell.w), round(_cell.h)))),
+                    _ov_intensity,
+                )
+        except Exception:
+            pass
+
     draw_cells = sorted(
         enumerate(layout.cells),
-        key=lambda item: (int(getattr(item[1], 'z_index', 0)), item[0]),
+        key=lambda item: (
+            int(getattr(item[1], 'z_index', 0)) + _depth_z.get(item[0], 0),
+            item[0],
+        ),
     )
     for cell_index, cell in draw_cells:
         if cell.image_index is None or cell.image_index >= len(project.images):
@@ -140,6 +168,12 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
                 render_h,
                 auto_neighbor_sides=auto_sides,
             )
+        # חפיפת עומק: add soft expansion to fade_padding for foreground cells.
+        # Full expansion zone is feathered → natural edge bleed, zero ghosting.
+        _exp = _depth_exp.get(cell_index, 0)
+        if _exp > 0:
+            fade_padding = tuple(fade_padding[i] + _exp for i in range(4))
+
         if any(fade_padding):
             with Image.open(state.path) as raw:
                 src = ImageOps.exif_transpose(raw).convert('RGB')
@@ -199,7 +233,7 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
             shadow_blur=shadow_blur,
             shadow_opacity=settings.shadow_opacity,
             edge_style=getattr(cell, 'edge_style', 'hard') if getattr(cell, 'edge_style', '') == 'torn_paper'
-            else ('soft_fade' if getattr(settings, 'soft_fade_enabled', False) else 'hard'),
+            else ('soft_fade' if any(fade_padding) else 'hard'),
             fade_padding=fade_padding,
             fade_curve=getattr(settings, 'soft_fade_curve', 'smooth'),
             rotation_deg=getattr(cell, 'rotation_deg', 0.0),
@@ -211,58 +245,8 @@ def render_project(project: ProjectState, include_bleed: bool = False) -> Image.
         from app.utils.image_utils import apply_shape_mask
         canvas = apply_shape_mask(canvas, layout.shape, settings, scale=1.0)
 
-    # חפיפת עומק — second compositing pass: foreground subjects overflow cell bounds
-    if getattr(settings, 'depth_overlap_enabled', False) and _depth_enabled and not getattr(layout, 'shape', ''):
-        try:
-            from app.core.depth_service import (
-                composite_depth_overlap, average_depth_score, extract_foreground_mask,
-                compute_overlap_amount,
-            )
-            _intensity = getattr(settings, 'depth_overlap_intensity', 0.5)
-            # Collect cells with valid depth, sorted background→foreground
-            _overlap_cells = []
-            for _cell in layout.cells:
-                if _cell.image_index is None or _cell.image_index >= len(project.images):
-                    continue
-                _st = project.images[_cell.image_index]
-                _dm = _depth_maps.get(_st.path)
-                if _dm is None:
-                    continue
-                _overlap_cells.append((average_depth_score(_dm), _cell, _st, _dm))
-            _overlap_cells.sort(key=lambda t: t[0])  # background first, foreground last
-
-            for _score, _cell, _st, _dm in _overlap_cells:
-                _x = int(round(_cell.x)) + bleed_px
-                _y = int(round(_cell.y)) + bleed_px
-                _w = max(1, int(round(_cell.w)))
-                _h = max(1, int(round(_cell.h)))
-                try:
-                    with Image.open(_st.path) as _raw:
-                        _src = ImageOps.exif_transpose(_raw).convert('RGB')
-                    if getattr(_st, 'rotation', 0) and _st.rotation % 360 != 0:
-                        _src = _src.rotate(-_st.rotation, expand=True)
-                    _crop = fit_crop_box(
-                        _src.size, (_w, _h), _st.pan_x, _st.pan_y,
-                        max(1.0, float(getattr(_st, 'zoom', 1.0))),
-                    )
-                    _cimg = _src.crop(_crop).resize((_w, _h), Image.Resampling.LANCZOS)
-                    import numpy as np
-                    _depth_cell = np.array(
-                        Image.fromarray((_dm * 255).astype(np.uint8)).resize(
-                            (_w, _h), Image.Resampling.BILINEAR
-                        )
-                    ).astype(np.float32) / 255.0
-                    canvas = composite_depth_overlap(
-                        canvas, _x, _y, _w, _h, _cimg, _depth_cell, _intensity
-                    )
-                except Exception:
-                    pass
-            if canvas.mode == 'RGBA':
-                _bg = Image.new('RGB', canvas.size, settings.background_rgb)
-                _bg.paste(canvas, mask=canvas.split()[3])
-                canvas = _bg
-        except Exception:
-            pass
+    # חפיפת עומק: Z-order + soft expansion handled inside the main render loop above.
+    # No second pass required.
 
     # Element overlays (above grid, below text overlays)
     if project.elements:
