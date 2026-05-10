@@ -29,6 +29,27 @@ except ImportError:  # pragma: no cover
     cv2 = None
     _CV2_AVAILABLE = False
 
+def _safe_models_dir() -> str:
+    """Return an ASCII-safe directory for model downloads.
+
+    Ultralytics uses curl internally; curl on Windows fails with error 23
+    (write error) when the destination path contains non-ASCII characters
+    such as Hebrew letters or Unicode direction marks.  Using LOCALAPPDATA
+    (e.g. C:\\Users\\name\\AppData\\Local) avoids this entirely.
+    """
+    base = (
+        os.environ.get('LOCALAPPDATA')          # Windows: always ASCII
+        or os.environ.get('XDG_CACHE_HOME')     # Linux/Mac: user-defined
+        or os.path.join(os.path.expanduser('~'), '.cache')
+    )
+    d = os.path.join(base, 'collai_models')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# Must be set BEFORE ultralytics is imported so it honours the override
+os.environ.setdefault('YOLO_CONFIG_DIR', _safe_models_dir())
+
 try:
     from ultralytics import YOLO
     _YOLO_IMPORT_ERROR = ''
@@ -148,7 +169,9 @@ def _get_yolo_model():
     if not yolo_available():
         return None
     try:
-        _YOLO_MODEL = YOLO(_YOLO_MODEL_NAME)
+        # Use full ASCII path so curl can write the file on Windows
+        model_path = os.path.join(_safe_models_dir(), _YOLO_MODEL_NAME)
+        _YOLO_MODEL = YOLO(model_path)
     except Exception:
         _YOLO_MODEL = None
     return _YOLO_MODEL
