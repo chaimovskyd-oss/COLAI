@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import logging
+from typing import Dict, List, Optional, Tuple
 
 # (cx, cy, w, h) all in normalized [0..1] coordinates relative to image size
 FaceRegion = Tuple[float, float, float, float]
@@ -8,17 +9,23 @@ FaceRegion = Tuple[float, float, float, float]
 # Re-export so callers can do: from app.core.face_detector import RichFaceDetection
 from app.core.face_analysis import RichFaceDetection  # noqa: E402
 
-_MP_KEYPOINT_NAMES = [
-    'right_eye', 'left_eye', 'nose_tip',
-    'mouth_center', 'right_ear', 'left_ear',
-]
+logger = logging.getLogger(__name__)
 
+# InsightFace buffalo_l keypoint order (5 points)
+_IF_KP_NAMES = ['right_eye', 'left_eye', 'nose_tip', 'right_mouth', 'left_mouth']
+
+# TODO: migrate to model_manager when available
 try:
-    import mediapipe as mp
+    from insightface.app import FaceAnalysis as _FaceAnalysis
     import numpy as np
-    _MP_AVAILABLE = True
+    _INSIGHTFACE_AVAILABLE = True
 except ImportError:
-    _MP_AVAILABLE = False
+    _FaceAnalysis = None
+    _INSIGHTFACE_AVAILABLE = False
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
 
 try:
     import cv2
@@ -33,13 +40,48 @@ except Exception:
     _RetinaFace = None
     _RETINAFACE_AVAILABLE = False
 
+# Singleton — loaded once at module level on first use
+_insightface_app = None
+
+
+def _get_insightface_app():
+    global _insightface_app
+    if _insightface_app is not None:
+        return _insightface_app
+    if not _INSIGHTFACE_AVAILABLE:
+        return None
+    try:
+        try:
+            import onnxruntime as _ort
+            providers = (
+                ['CUDAExecutionProvider']
+                if 'CUDAExecutionProvider' in _ort.get_available_providers()
+                else ['CPUExecutionProvider']
+            )
+        except Exception:
+            providers = ['CPUExecutionProvider']
+
+        ctx_id = 0 if providers[0] == 'CUDAExecutionProvider' else -1
+        app = _FaceAnalysis(name='buffalo_l', root='./models', providers=providers)
+        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+        _insightface_app = app
+        logger.info('InsightFace buffalo_l loaded (%s)', providers[0])
+    except Exception as exc:
+        logger.warning('InsightFace failed to load: %s', exc)
+        _insightface_app = None
+    return _insightface_app
+
 
 def is_available() -> bool:
-    return _MP_AVAILABLE or _CV2_AVAILABLE
+    return _INSIGHTFACE_AVAILABLE or _CV2_AVAILABLE
 
 
 def mediapipe_available() -> bool:
-    return _MP_AVAILABLE
+    return False
+
+
+def insightface_available() -> bool:
+    return _INSIGHTFACE_AVAILABLE and _get_insightface_app() is not None
 
 
 def retinaface_available() -> bool:
@@ -146,8 +188,6 @@ def _opencv_face_fallback(image, person_boxes: Optional[List[Tuple[float, float,
 
 def detect_faces(image_path: str) -> List[FaceRegion]:
     """Detect faces in an image and return normalized (cx, cy, w, h) tuples."""
-    if not _MP_AVAILABLE:
-        return []
     try:
         from PIL import Image, ImageOps
 
@@ -170,8 +210,6 @@ def faces_centroid(faces: List[FaceRegion]) -> Tuple[float, float]:
 
 def detect_faces_detailed(image_path: str) -> List[RichFaceDetection]:
     """Detect faces and return RichFaceDetection objects with confidence + keypoints."""
-    if not _MP_AVAILABLE:
-        return []
     try:
         from PIL import Image, ImageOps
 
@@ -183,55 +221,95 @@ def detect_faces_detailed(image_path: str) -> List[RichFaceDetection]:
 
 
 def detect_faces_detailed_from_image(image) -> List[RichFaceDetection]:
-    """Detect faces from a PIL image / RGB array.
+    """Detect faces from a PIL image using InsightFace buffalo_l.
 
-    This keeps the detector reusable for preview-sized smart-crop analysis.
+    Falls back to OpenCV Haar cascade if InsightFace is unavailable.
+    Returns normalized RichFaceDetection objects (cx, cy, w, h all in [0..1]).
     """
-    faces: List[RichFaceDetection] = []
-    if _MP_AVAILABLE:
-        try:
-            import mediapipe as mp  # noqa: F811
-            import numpy as np  # noqa: F811
+    app = _get_insightface_app()
+    if app is None or np is None:
+        return []
 
-            arr = np.array(image)
-            mp_fd = mp.solutions.face_detection
+    try:
+        arr = np.array(image.convert('RGB') if hasattr(image, 'convert') else image)
+        if _CV2_AVAILABLE:
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        else:
+            bgr = arr[:, :, ::-1].copy()
+        ih, iw = bgr.shape[:2]
+        image_area = max(1, iw * ih)
 
-            for model_sel, min_conf in ((0, 0.3), (1, 0.3)):
-                with mp_fd.FaceDetection(
-                    model_selection=model_sel,
-                    min_detection_confidence=min_conf,
-                ) as detector:
-                    results = detector.process(arr)
-                if not results.detections:
-                    continue
+        raw = app.get(bgr)
+        faces: List[RichFaceDetection] = []
 
-                for det in results.detections:
-                    bb = det.location_data.relative_bounding_box
-                    cx = bb.xmin + bb.width / 2.0
-                    cy = bb.ymin + bb.height / 2.0
-                    conf = float(det.score[0]) if det.score else 0.75
+        for face in raw:
+            score = float(face.det_score)
+            if score < 0.6:
+                continue
 
-                    kps: dict = {}
-                    for i, kp in enumerate(det.location_data.relative_keypoints):
-                        if i < len(_MP_KEYPOINT_NAMES):
-                            kps[_MP_KEYPOINT_NAMES[i]] = (
-                                float(max(0.0, min(kp.x, 1.0))),
-                                float(max(0.0, min(kp.y, 1.0))),
-                            )
+            x1, y1, x2, y2 = (float(v) for v in face.bbox)
 
-                    faces.append(RichFaceDetection(
-                        cx=float(min(max(cx, 0.0), 1.0)),
-                        cy=float(min(max(cy, 0.0), 1.0)),
-                        w=float(bb.width),
-                        h=float(bb.height),
-                        confidence=conf,
-                        keypoints=kps,
-                    ))
-                break
-        except Exception:
-            faces = []
+            # Reject faces smaller than 2% of image area
+            face_area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            if face_area / image_area < 0.02:
+                continue
 
-    return _dedupe_faces(faces)
+            x1 = max(0.0, min(x1, iw))
+            y1 = max(0.0, min(y1, ih))
+            x2 = max(0.0, min(x2, iw))
+            y2 = max(0.0, min(y2, ih))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            kps: Dict[str, Tuple[float, float]] = {}
+            if getattr(face, 'kps', None) is not None:
+                for i, name in enumerate(_IF_KP_NAMES):
+                    if i < len(face.kps):
+                        px, py = float(face.kps[i][0]), float(face.kps[i][1])
+                        kps[name] = (
+                            max(0.0, min(px / iw, 1.0)),
+                            max(0.0, min(py / ih, 1.0)),
+                        )
+                # Synthesise mouth_center so crop risk eval can check it
+                if 'right_mouth' in kps and 'left_mouth' in kps:
+                    kps['mouth_center'] = (
+                        (kps['right_mouth'][0] + kps['left_mouth'][0]) / 2.0,
+                        (kps['right_mouth'][1] + kps['left_mouth'][1]) / 2.0,
+                    )
+
+            faces.append(RichFaceDetection(
+                cx=float((x1 + x2) / 2.0 / iw),
+                cy=float((y1 + y2) / 2.0 / ih),
+                w=float((x2 - x1) / iw),
+                h=float((y2 - y1) / ih),
+                confidence=score,
+                keypoints=kps,
+            ))
+
+        return _dedupe_faces(faces)
+
+    except Exception as exc:
+        if 'out of memory' in str(exc).lower():
+            logger.warning('InsightFace CUDA OOM — clearing cache and retrying on CPU')
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            global _insightface_app
+            _insightface_app = None
+            try:
+                fallback = _FaceAnalysis(
+                    name='buffalo_l', root='./models',
+                    providers=['CPUExecutionProvider'],
+                )
+                fallback.prepare(ctx_id=-1, det_size=(640, 640))
+                _insightface_app = fallback
+                return detect_faces_detailed_from_image(image)
+            except Exception:
+                pass
+        logger.warning('InsightFace detection error: %s', exc)
+        return []
 
 
 def detect_faces_retina_from_image(image) -> List[RichFaceDetection]:
@@ -310,7 +388,7 @@ def detect_faces_with_fallback_from_image(
     image,
     person_boxes: Optional[List[Tuple[float, float, float, float]]] = None,
 ) -> List[RichFaceDetection]:
-    """MediaPipe first, then strict OpenCV fallback only when person hints exist."""
+    """InsightFace first, then strict OpenCV fallback only when person hints exist."""
     faces = detect_faces_detailed_from_image(image)
     if faces or not person_boxes:
         return faces
@@ -322,9 +400,16 @@ def detect_faces_advanced_from_image(
     prefer_retina: bool = True,
     person_boxes: Optional[List[Tuple[float, float, float, float]]] = None,
 ) -> List[RichFaceDetection]:
-    """Advanced face detection path for explicit scan mode."""
+    """Advanced face detection path for explicit scan mode.
+
+    InsightFace is the primary backend. RetinaFace is used as a supplement
+    when prefer_retina=True and InsightFace returns nothing.
+    """
+    faces = detect_faces_detailed_from_image(image)
+    if faces:
+        return faces
     if prefer_retina and retinaface_available():
         faces = detect_faces_retina_from_image(image)
         if faces:
             return faces
-    return detect_faces_with_fallback_from_image(image, person_boxes=person_boxes)
+    return _opencv_face_fallback(image, person_boxes=person_boxes)
