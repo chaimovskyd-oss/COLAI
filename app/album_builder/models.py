@@ -39,12 +39,13 @@ class AlbumPage:
 class AlbumSettings:
     """User-controlled album generation settings."""
 
-    density: str = 'balanced'          # 'airy' | 'balanced' | 'dense'
-    min_per_page: int = 3
-    max_per_page: int = 8
+    density: str = 'mixed'             # 'mixed' | 'airy' | 'balanced' | 'dense'
+    min_per_page: int = 1
+    max_per_page: int = 9
     hero_pages: bool = True             # dedicate pages to top-importance photos
     hero_threshold: float = 0.75        # importance score above which = hero
     title: str = 'האלבום שלי'
+    target_pages: int = 0              # 0 = auto; >0 = user-chosen page count
 
 
 # density preset limits

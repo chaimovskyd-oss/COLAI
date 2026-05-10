@@ -564,6 +564,107 @@ class DropListWidget(QListWidget):
 
 
 # ---------------------------------------------------------------------------
+# Album page strip — horizontal thumbnail row at canvas bottom
+# ---------------------------------------------------------------------------
+
+class _AlbumPageStrip(QWidget):
+    """Scrollable row of page thumbnails shown when an album is open in main view."""
+
+    page_selected = Signal(int)
+
+    _THUMB_W = 90
+    _THUMB_H = 62
+    _BTN_NORMAL = (
+        'QPushButton{background:#1a2535;border:2px solid #2a3a50;border-radius:4px;'
+        'color:#7aafe0;font-size:9px;padding:2px;}'
+        'QPushButton:hover{border-color:#4a7aaa;}'
+    )
+    _BTN_ACTIVE = (
+        'QPushButton{background:#0d2137;border:2px solid #4a9eff;border-radius:4px;'
+        'color:#fff;font-size:9px;font-weight:bold;padding:2px;}'
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(92)
+        self.setStyleSheet('background:#0a1018; border-top:1px solid #1e2e42;')
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setSpacing(0)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.NoFrame)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet('background:transparent;')
+
+        self._inner = QWidget()
+        self._inner.setStyleSheet('background:transparent;')
+        self._row = QHBoxLayout(self._inner)
+        self._row.setContentsMargins(4, 0, 4, 0)
+        self._row.setSpacing(6)
+        self._row.addStretch(1)
+        self._scroll.setWidget(self._inner)
+        outer.addWidget(self._scroll, 1)
+
+        self._btns: list = []
+        self._current = 0
+        self._session = None
+
+    def set_session(self, session, builder=None) -> None:
+        """Populate strip from AlbumSession. Renders placeholder thumbnails."""
+        self._session = session
+        self._builder = builder
+        for btn in self._btns:
+            self._row.removeWidget(btn)
+            btn.deleteLater()
+        self._btns.clear()
+
+        stretch = self._row.takeAt(self._row.count() - 1)
+        n = session.page_count
+        for i in range(n):
+            btn = QPushButton(f'דף {i + 1}')
+            btn.setFixedSize(self._THUMB_W, self._THUMB_H)
+            btn.setStyleSheet(self._BTN_ACTIVE if i == 0 else self._BTN_NORMAL)
+            btn.clicked.connect(lambda _, ix=i: self._select(ix))
+            self._row.addWidget(btn)
+            self._btns.append(btn)
+
+            # Set a real thumbnail in background
+            self._render_thumb_async(i, btn, session)
+
+        self._row.addStretch(1)
+        self._current = 0
+
+    def select(self, idx: int) -> None:
+        self._select(idx, emit=False)
+
+    def _select(self, idx: int, emit: bool = True) -> None:
+        for i, btn in enumerate(self._btns):
+            btn.setStyleSheet(self._BTN_ACTIVE if i == idx else self._BTN_NORMAL)
+        self._current = idx
+        if emit:
+            self.page_selected.emit(idx)
+
+    def _render_thumb_async(self, idx: int, btn: QPushButton, session) -> None:
+        """Render a tiny page thumbnail and set it as button icon (best-effort)."""
+        try:
+            page_project = session.make_page_project(idx)
+            if page_project is None or page_project.selected_layout is None:
+                return
+            from app.core.exporter import render_project
+            img = render_project(page_project)
+            thumb = img.resize((self._THUMB_W - 4, self._THUMB_H - 18), __import__('PIL').Image.Resampling.LANCZOS)
+            from app.utils.image_utils import pil_to_qpixmap
+            pix = pil_to_qpixmap(thumb)
+            btn.setIcon(QIcon(pix))
+            btn.setIconSize(QSize(self._THUMB_W - 4, self._THUMB_H - 18))
+        except Exception:
+            pass  # thumbnail is optional — page number label is the fallback
+
+
+# ---------------------------------------------------------------------------
 # Toast — progress notification for depth operations
 # ---------------------------------------------------------------------------
 
@@ -696,6 +797,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(tr('Smart Collage Maker'))
         self.setAcceptDrops(True)   # whole-window drag-and-drop
         self.project = ProjectState()
+        self._active_album_session = None   # set when album is open in main editor
         self._print_preview_windows: List[PrintPreviewWindow] = []
         self.history: List[tuple] = []
         self.history_index = -1
@@ -1052,6 +1154,7 @@ class MainWindow(QMainWindow):
         # Index 1 — album wizard (self-contained, no shared state)
         self._album_wizard = AlbumWizard()
         self._album_wizard.exit_requested.connect(self._on_exit_album_wizard)
+        self._album_wizard.open_in_main.connect(self.open_album_session)
         self._central_stack.addWidget(self._album_wizard)  # index 1
 
         # Panels are created inside _build_right_panel (sidebar stack)
@@ -1088,6 +1191,12 @@ class MainWindow(QMainWindow):
         self._chscroll.setFixedHeight(14)
         self._chscroll.hide()
         vlay.addWidget(self._chscroll)
+
+        # Album page strip — horizontal thumbnail row (hidden until album active)
+        self._album_strip = _AlbumPageStrip(frame)
+        self._album_strip.page_selected.connect(self._on_album_strip_page)
+        self._album_strip.hide()
+        vlay.addWidget(self._album_strip)
 
         # zoom bar
         zoom_bar = QWidget()
@@ -4990,5 +5099,78 @@ class MainWindow(QMainWindow):
         """Called when the user clicks 'חזור לקולאז'' inside the wizard."""
         self._album_mode_btn.setChecked(False)
         self._central_stack.setCurrentIndex(0)
+
+    # -------------------------------------------------------------------
+    # Album open in main editor
+    # -------------------------------------------------------------------
+
+    def open_album_session(self, session) -> None:
+        """Receive album from wizard, open it in the main collage editor."""
+        from app.album_builder.builder import AlbumBuilder
+        self._active_album_session = session
+        self._active_album_builder = AlbumBuilder.__new__(AlbumBuilder)
+        self._active_album_builder.project = session.make_preview_project()
+        self._active_album_builder.project.images = list(session.image_states)
+
+        # Switch back to main view
+        self._album_mode_btn.setChecked(False)
+        self._central_stack.setCurrentIndex(0)
+
+        # Show page strip
+        self._album_strip.set_session(session)
+        self._album_strip.show()
+
+        # Show first page
+        self._show_main_album_page(0)
+
+    def _on_album_strip_page(self, idx: int) -> None:
+        self._show_main_album_page(idx)
+
+    def _show_main_album_page(self, idx: int) -> None:
+        session = getattr(self, '_active_album_session', None)
+        if session is None:
+            return
+        page_project = session.make_page_project(idx)
+        if page_project is None:
+            return
+        if session.album_state:
+            session.album_state.current_page_index = idx
+
+        # Populate layout suggestions for this page
+        page_project.suggestions = self._get_page_suggestions(page_project, idx)
+
+        self.canvas.project = page_project
+        self.canvas.refresh_preview()
+        self._album_strip.select(idx)
+
+        # Update right-panel suggestion list with alternatives for this page
+        self._rebuild_layout_list()
+
+        # Track in project for undo
+        self._push_history()
+
+    def _get_page_suggestions(self, page_project, page_idx):
+        """Generate layout alternatives for the current page."""
+        try:
+            from app.core.collage_engine import generate_suggestions
+            n = len(page_project.images)
+            suggs = generate_suggestions(page_project.settings, n,
+                                         images=page_project.images)
+            # Put current page layout first
+            session = getattr(self, '_active_album_session', None)
+            if session and session.album_state:
+                page = session.album_state.pages[page_idx]
+                if page.layout and page.layout not in suggs:
+                    suggs.insert(0, page.layout)
+            return suggs
+        except Exception:
+            return []
+
+    def _close_album_view(self) -> None:
+        """Remove album strip and return canvas to normal single-collage mode."""
+        self._active_album_session = None
+        self._album_strip.hide()
+        self.canvas.project = self.project
+        self.canvas.refresh_preview()
 
     # Album mode handlers moved to AlbumWizard widget (app/ui/album_wizard.py)

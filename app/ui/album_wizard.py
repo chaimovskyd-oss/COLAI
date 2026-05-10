@@ -264,17 +264,39 @@ class _SettingsPanel(QWidget):
         f.addRow(QLabel('רזולוציה', styleSheet=_LABEL), self._dpi_combo)
         vlay.addWidget(size_grp)
 
-        # Layout density
+        # Layout density + page count
         density_grp = self._group('פריסה')
         f2 = QFormLayout(density_grp)
         f2.setSpacing(6)
-        self._density_combo = QComboBox()
-        self._density_combo.addItems(['מרווח (2-4 לדף)', 'מאוזן (4-7 לדף)', 'צפוף (6-10 לדף)'])
-        self._density_combo.setCurrentIndex(1)
-        self._density_combo.setStyleSheet(_COMBO)
-        f2.addRow(QLabel('צפיפות', styleSheet=_LABEL), self._density_combo)
 
-        self._hero_chk = QCheckBox('עמודי גיבורים')
+        self._density_combo = QComboBox()
+        self._density_combo.addItems([
+            'מעורב — גיבורים + סיפור + צפוף',
+            'מרווח (1-3 לדף)',
+            'מאוזן (4-6 לדף)',
+            'צפוף (6-9 לדף)',
+        ])
+        self._density_combo.setCurrentIndex(0)
+        self._density_combo.setStyleSheet(_COMBO)
+        f2.addRow(QLabel('סגנון', styleSheet=_LABEL), self._density_combo)
+
+        pages_row = QHBoxLayout()
+        self._pages_spin = QSpinBox()
+        self._pages_spin.setRange(0, 200)
+        self._pages_spin.setValue(0)
+        self._pages_spin.setSpecialValueText('אוטומטי')
+        self._pages_spin.setStyleSheet(
+            'QSpinBox{background:#1e2a38;color:#c0d0e8;border:1px solid #2a3a50;'
+            'border-radius:4px;padding:2px 4px;font-size:11px;}'
+        )
+        pages_row.addWidget(self._pages_spin)
+        pages_lbl = QLabel('עמודים')
+        pages_lbl.setStyleSheet(_LABEL)
+        pages_row.addWidget(pages_lbl)
+        pages_row.addStretch(1)
+        f2.addRow(QLabel('כמות', styleSheet=_LABEL), pages_row)
+
+        self._hero_chk = QCheckBox('עמודי גיבורים (1-2 תמונות)')
         self._hero_chk.setChecked(True)
         self._hero_chk.setStyleSheet(f'color:{_TXT2}; font-size:11px;')
         f2.addRow('', self._hero_chk)
@@ -296,6 +318,17 @@ class _SettingsPanel(QWidget):
         self._gen_btn.clicked.connect(self._on_generate)
         vlay.addWidget(self._gen_btn)
 
+        # "Open in main editor" — shown after generation
+        self._open_main_btn = QPushButton('✅  ערוך בעורך הראשי')
+        self._open_main_btn.setStyleSheet(
+            'QPushButton{background:#0d4a1f;color:#5ef08a;border:1px solid #1a9040;'
+            'border-radius:5px;font-size:12px;font-weight:bold;padding:6px 12px;}'
+            'QPushButton:hover{background:#1a6030;}'
+        )
+        self._open_main_btn.setFixedHeight(38)
+        self._open_main_btn.hide()
+        vlay.addWidget(self._open_main_btn)
+
     def _group(self, title: str) -> QGroupBox:
         g = QGroupBox(title)
         g.setStyleSheet(
@@ -307,19 +340,38 @@ class _SettingsPanel(QWidget):
 
     def set_image_count(self, n: int) -> None:
         self._gen_btn.setEnabled(n > 0)
+        target = self._pages_spin.value()
         if n == 0:
             self._stats_lbl.setText('יש לייבא תמונות תחילה.')
+        elif target > 0:
+            avg = n / target
+            self._stats_lbl.setText(
+                f'{n} תמונות ← {target} עמודים\n(ממוצע {avg:.1f} לעמוד)'
+            )
         else:
-            self._stats_lbl.setText(f'{n} תמונות מוכנות לאלבום.')
+            self._stats_lbl.setText(f'{n} תמונות — כמות עמודים אוטומטית')
 
     def set_generating(self, on: bool) -> None:
         self._gen_btn.setEnabled(not on)
+        self._open_main_btn.setEnabled(not on)
         self._gen_btn.setText('מעבד…' if on else '▶  צור אלבום')
 
+    def show_open_main_button(self, callback) -> None:
+        self._open_main_btn.show()
+        try:
+            self._open_main_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self._open_main_btn.clicked.connect(callback)
+
     def album_settings(self) -> AlbumSettings:
-        density_map = {0: 'airy', 1: 'balanced', 2: 'dense'}
-        density = density_map.get(self._density_combo.currentIndex(), 'balanced')
-        return AlbumSettings(density=density, hero_pages=self._hero_chk.isChecked())
+        density_map = {0: 'mixed', 1: 'airy', 2: 'balanced', 3: 'dense'}
+        density = density_map.get(self._density_combo.currentIndex(), 'mixed')
+        return AlbumSettings(
+            density=density,
+            hero_pages=self._hero_chk.isChecked(),
+            target_pages=self._pages_spin.value(),
+        )
 
     def apply_to_settings(self, settings) -> None:
         """Write chosen page size + DPI into a ProjectSettings object."""
@@ -508,6 +560,7 @@ class AlbumWizard(QWidget):
     """Full-screen Album Builder. Shown via QStackedWidget in MainWindow."""
 
     exit_requested = Signal()
+    open_in_main   = Signal(object)   # AlbumSession — open in main editor
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -662,6 +715,8 @@ class AlbumWizard(QWidget):
         if n > 0:
             self._canvas_stack.setCurrentIndex(1)
             self._show_page(0)
+        # Show "open in main editor" button
+        self._settings_panel.show_open_main_button(self._open_in_main)
 
     def _on_failed(self, msg: str) -> None:
         self._settings_panel.set_generating(False)
@@ -713,6 +768,10 @@ class AlbumWizard(QWidget):
         except Exception as exc:
             self._progress.hide()
             QMessageBox.critical(self, 'שגיאה בייצוא', str(exc))
+
+    def _open_in_main(self) -> None:
+        """Emit open_in_main signal — MainWindow will take over from here."""
+        self.open_in_main.emit(self._session)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
