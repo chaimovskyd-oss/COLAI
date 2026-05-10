@@ -53,8 +53,9 @@ class AlbumSession:
         pv.suggestions = [page.layout] if page.layout else []
         from app.models.project import TextOverlay
         pv.text_overlay = TextOverlay()
-        pv.text_overlays = []
-        pv.elements = []
+        # Restore per-page overlays and elements (preserved across page switches)
+        pv.text_overlays = list(page.text_overlays)
+        pv.elements = list(page.elements)
         pv.album_state = None
         return pv
 

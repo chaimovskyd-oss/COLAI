@@ -567,6 +567,80 @@ class DropListWidget(QListWidget):
         e.acceptProposedAction()
 
 
+
+# ---------------------------------------------------------------------------
+# Album image list — draggable thumbnails for right-panel sidebar
+# ---------------------------------------------------------------------------
+
+class _AlbumImageList(QListWidget):
+    """Draggable grid of all album session images shown in the right panel."""
+
+    _THUMB_W, _THUMB_H = 68, 50
+    _MIME = 'application/x-colai-image-path'
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setViewMode(QListWidget.IconMode)
+        self.setIconSize(QSize(self._THUMB_W, self._THUMB_H))
+        self.setSpacing(4)
+        self.setResizeMode(QListWidget.Adjust)
+        self.setMovement(QListWidget.Static)
+        self.setDragEnabled(True)
+        self.setDefaultDropAction(Qt.CopyAction)
+        self.setSelectionMode(QListWidget.SingleSelection)
+        self.setMaximumHeight(180)
+        self.setStyleSheet(
+            'QListWidget{background:#0d1420;border:1px solid #1e2e42;border-radius:4px;}'
+            'QListWidget::item{border-radius:3px;}'
+            'QListWidget::item:selected{background:#1a3a5c;}'
+            'QListWidget::item:hover{background:#1a2535;}'
+        )
+
+    def set_images(self, image_states: list) -> None:
+        self.clear()
+        for state in image_states:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, state.path)
+            item.setToolTip(os.path.basename(state.path))
+            item.setIcon(self._make_icon(state.path))
+            self.addItem(item)
+
+    def startDrag(self, supported_actions) -> None:
+        item = self.currentItem()
+        if item is None:
+            return
+        path = item.data(Qt.UserRole)
+        from PySide6.QtGui import QDrag
+        from PySide6.QtCore import QMimeData, QByteArray
+        mime = QMimeData()
+        mime.setData(self._MIME, QByteArray(path.encode('utf-8')))
+        icon = item.icon()
+        pix = icon.pixmap(self._THUMB_W, self._THUMB_H)
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(pix)
+        drag.setHotSpot(pix.rect().center())
+        drag.exec_(Qt.CopyAction)
+
+    def _make_icon(self, path: str) -> QIcon:
+        try:
+            pix = QPixmap(path)
+            if pix.isNull():
+                raise ValueError
+            pix = pix.scaled(
+                self._THUMB_W, self._THUMB_H,
+                Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
+            )
+            pw, ph = pix.width(), pix.height()
+            ox = (pw - self._THUMB_W) // 2
+            oy = (ph - self._THUMB_H) // 2
+            return QIcon(pix.copy(ox, oy, self._THUMB_W, self._THUMB_H))
+        except Exception:
+            p = QPixmap(self._THUMB_W, self._THUMB_H)
+            p.fill(QColor('#1e2a38'))
+            return QIcon(p)
+
+
 # ---------------------------------------------------------------------------
 # Album thumbnail worker — renders page thumbnails in background
 # ---------------------------------------------------------------------------
@@ -634,18 +708,24 @@ class _AlbumPageStrip(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(92)
+        self.setFixedHeight(108)   # extra 16 px for the scroll bar track
         self.setStyleSheet('background:#0a1018; border-top:1px solid #1e2e42;')
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setContentsMargins(6, 4, 6, 2)
         outer.setSpacing(0)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QScrollArea.NoFrame)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet('background:transparent;')
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setStyleSheet(
+            'background:transparent;'
+            'QScrollBar:horizontal{height:8px;background:#0d1828;border-radius:4px;}'
+            'QScrollBar::handle:horizontal{background:#2a4a70;border-radius:4px;min-width:20px;}'
+            'QScrollBar::handle:horizontal:hover{background:#4a9eff;}'
+            'QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;}'
+        )
 
         self._inner = QWidget()
         self._inner.setStyleSheet('background:transparent;')
@@ -698,6 +778,9 @@ class _AlbumPageStrip(QWidget):
         for i, btn in enumerate(self._btns):
             btn.setStyleSheet(self._BTN_ACTIVE if i == idx else self._BTN_NORMAL)
         self._current = idx
+        # Scroll the strip so the selected page tab is visible
+        if 0 <= idx < len(self._btns):
+            self._scroll.ensureWidgetVisible(self._btns[idx], 10, 0)
         if emit:
             self.page_selected.emit(idx)
 
@@ -1118,6 +1201,11 @@ class MainWindow(QMainWindow):
         a['swap']   = self._edit_menu.addAction('', self._toggle_swap_shortcut)
         a['swap'].setShortcut(QKeySequence('Tab'))
         self._edit_menu.addSeparator()
+        a['layout_edit'] = self._edit_menu.addAction('⊞  Edit Layout (drag borders)', self._toggle_layout_edit_shortcut)
+        a['layout_edit'].setShortcut(QKeySequence('Ctrl+L'))
+        a['layout_edit'].setCheckable(True)
+        a['reset_layout'] = self._edit_menu.addAction('↺  Reset Layout', self.reset_layout)
+        self._edit_menu.addSeparator()
         a['remove'] = self._edit_menu.addAction('', self._delete_key_handler)
         a['reset_all'] = self._edit_menu.addAction('', self.reset_all_images)
 
@@ -1305,6 +1393,19 @@ class MainWindow(QMainWindow):
         self.depth_smart_crop_btn.setToolTip('שפר מיקום קרופ לפי ניתוח עומק תמונה')
         self._depth_worker: Optional[_DepthSmartCropWorker] = None
 
+        self._layout_edit_btn = QPushButton('⊞  Edit Layout')
+        self._layout_edit_btn.setFixedHeight(22)
+        self._layout_edit_btn.setCheckable(True)
+        self._layout_edit_btn.setStyleSheet(
+            _zbtn
+            + 'QPushButton{font-size:11px; padding:0 8px;}'
+            + 'QPushButton:checked{background:rgba(30,120,220,200); color:#fff; border-color:rgba(80,160,255,180);}'
+        )
+        self._layout_edit_btn.setFocusPolicy(Qt.NoFocus)
+        self._layout_edit_btn.setToolTip(
+            'Toggle layout edit mode — drag borders between cells to resize them\n'
+            '(disables image pan/zoom while active)')
+
         self._album_mode_btn = QPushButton('🎞  אלבום')
         self._album_mode_btn.setFixedHeight(22)
         self._album_mode_btn.setCheckable(True)
@@ -1326,6 +1427,8 @@ class MainWindow(QMainWindow):
         zlay.addWidget(self._czoom_sl, 1)
         zlay.addWidget(self.refresh_images_btn)
         zlay.addWidget(self.depth_smart_crop_btn)
+        zlay.addWidget(self.reset_layout_btn)
+        zlay.addWidget(self._layout_edit_btn)
         zlay.addWidget(self._album_mode_btn)
         zlay.addWidget(self._czoom_in)
         zlay.addSpacing(6)
@@ -1769,6 +1872,10 @@ class MainWindow(QMainWindow):
         self.swap_btn.setCheckable(True)
         self.undo_btn = QPushButton('ג†©  Undo  (Ctrl+Z)')
         self.redo_btn = QPushButton('ג†×  Redo  (Ctrl+Y)')
+        self.reset_layout_btn = QPushButton('↺  Reset layout')
+        self.reset_layout_btn.setFixedHeight(22)
+        self.reset_layout_btn.setToolTip('Reset cell sizes to the original layout')
+        self.reset_layout_btn.setEnabled(False)
         _primary_style = (
             'QPushButton { background:#1a5a90; color:#fff; font-weight:bold;'
             ' border-radius:6px; border:none; padding:6px 12px; }'
@@ -1892,6 +1999,20 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setSpacing(4)
 
+        # Album images sidebar (shown only in album mode, hidden by default)
+        self._album_images_grp = QGroupBox('תמונות אלבום — גרור לקנבס להחלפה')
+        self._album_images_grp.setStyleSheet(
+            'QGroupBox{color:#7aafe0;font-size:11px;border:1px solid #2a3a50;'
+            'border-radius:5px;margin-top:6px;padding-top:4px;}'
+            'QGroupBox::title{subcontrol-origin:margin;left:8px;}'
+        )
+        aig_lay = QVBoxLayout(self._album_images_grp)
+        aig_lay.setContentsMargins(4, 4, 4, 4)
+        self._album_image_list = _AlbumImageList()
+        aig_lay.addWidget(self._album_image_list)
+        self._album_images_grp.hide()
+        layout.addWidget(self._album_images_grp)
+
         self._images_group = g = QGroupBox('Images')
         gl = QVBoxLayout(g)
         row = QHBoxLayout()
@@ -1948,8 +2069,10 @@ class MainWindow(QMainWindow):
         self.layout_list.currentRowChanged.connect(self.select_layout)
         self.canvas.cellSelected.connect(self.on_cell_selected)
         self.canvas.swapPerformed.connect(self._on_swap_performed)
-        self.canvas.cellPanChanged.connect(self._check_quality_warnings)
+        self.canvas.cellPanChanged.connect(self._on_cell_pan_changed)
+        self.canvas.layoutEdited.connect(self._push_history)
         self.canvas.replaceImageRequested.connect(self.replace_image_in_cell)
+        self.canvas.replaceImageWithPath.connect(self._replace_cell_image_with_path)
         self.canvas.removeImageFromCell.connect(self.remove_image_from_cell)
         self.canvas.editImageInColorLab.connect(self._open_color_lab)
         self.canvas.editImageInPhotoshop.connect(self._edit_cell_in_photoshop)
@@ -2027,6 +2150,8 @@ class MainWindow(QMainWindow):
         self.swap_btn.toggled.connect(self._on_swap_mode_toggled)
         self.undo_btn.clicked.connect(self.undo)
         self.redo_btn.clicked.connect(self.redo)
+        self.reset_layout_btn.clicked.connect(self.reset_layout)
+        self._layout_edit_btn.toggled.connect(self._on_layout_edit_mode_toggled)
 
         # Sidebar panel signals
         self.image_panel.changed.connect(self._on_float_image_changed)
@@ -2175,7 +2300,10 @@ class MainWindow(QMainWindow):
         self._apply_custom_grid()
 
     def _update_settings(self):
-        s = self.project.settings
+        # In album mode write to the active page's settings (= session.settings,
+        # shared by all pages), otherwise to the main project.
+        ap = self._active_project
+        s = ap.settings
         s.width_cm = self.width_spin.value()
         s.height_cm = self.height_spin.value()
         s.dpi = self.dpi_spin.value()
@@ -2187,19 +2315,18 @@ class MainWindow(QMainWindow):
             self._actions['smart_debug'].blockSignals(True)
             self._actions['smart_debug'].setChecked(s.smart_crop_debug)
             self._actions['smart_debug'].blockSignals(False)
-        if self.project.images:
+        if ap.images:
             if not self._refresh_special_layout():
-                if self.project.selected_layout:
-                    # Canvas change only: regenerate for new pixel dimensions but
-                    # keep the same layout type selected and preserve image assignments.
+                if ap.selected_layout:
                     self._regenerate_preserving_layout()
                 else:
                     self._generate_layout_suggestions(
-                        use_analysis=(self.project.settings.analysis_mode == 'scanned')
+                        use_analysis=(ap.settings.analysis_mode == 'scanned')
                     )
             self._check_quality_warnings()
         else:
             self.canvas.refresh_preview()
+        self._sync_album_page_data()
 
     # -------------------------------------------------------------------
     # Lock helpers
@@ -2214,23 +2341,27 @@ class MainWindow(QMainWindow):
     def _regenerate_preserving_layout(self) -> None:
         """Regenerate layout suggestions for updated canvas dimensions while keeping
         the currently-selected layout type and image assignments unchanged."""
-        old = self.project.selected_layout
+        project = self._active_project
+        old = project.selected_layout
         old_name = old.name if old else None
         old_assignments = {i: c.image_index for i, c in enumerate(old.cells)} if old else {}
 
-        use_analysis = self.project.settings.analysis_mode == 'scanned'
-        layout_images = self.project.images if use_analysis else [
+        use_analysis = project.settings.analysis_mode == 'scanned'
+        layout_images = project.images if use_analysis else [
             ImageState(path=s.path, asset_type=getattr(s, 'asset_type', 'photo'), rotation=s.rotation, analysis_status=s.analysis_status)
-            for s in self.project.images
+            for s in project.images
         ]
 
-        self.project.suggestions = generate_suggestions(
-            self.project.settings, len(self.project.images), images=layout_images)
-        self._append_user_template_layouts()
+        project.suggestions = generate_suggestions(
+            project.settings, len(project.images), images=layout_images)
+        if getattr(self, '_active_album_session', None) is None:
+            self._append_user_template_layouts()
+        if getattr(self, '_active_album_session', None) is not None:
+            self.project.suggestions = project.suggestions
 
-        canvas_px = self.project.settings.canvas_px
+        canvas_px = project.settings.canvas_px
         self.layout_list.clear()
-        for layout in self.project.suggestions:
+        for layout in project.suggestions:
             label = f'{layout.name}  {layout.score:.0%}' if layout.score > 0 else layout.name
             item = QListWidgetItem(label)
             item.setIcon(QIcon(self._layout_thumbnail(layout, canvas_px)))
@@ -2238,33 +2369,34 @@ class MainWindow(QMainWindow):
             self.layout_list.addItem(item)
 
         new_idx = next(
-            (i for i, s in enumerate(self.project.suggestions) if s.name == old_name), None)
+            (i for i, s in enumerate(project.suggestions) if s.name == old_name), None)
 
         if new_idx is None:
-            if old is not None and old not in self.project.suggestions:
-                self.project.suggestions.append(old)
-                old_idx = len(self.project.suggestions) - 1
+            if old is not None and old not in project.suggestions:
+                project.suggestions.append(old)
+                old_idx = len(project.suggestions) - 1
                 item = QListWidgetItem(old_name or 'Current layout')
                 item.setIcon(QIcon(self._layout_thumbnail(old, canvas_px)))
                 item.setTextAlignment(Qt.AlignCenter)
                 self.layout_list.addItem(item)
             else:
-                old_idx = self.project.suggestions.index(old) if old in self.project.suggestions else -1
-            self.project.selected_layout = old
+                old_idx = project.suggestions.index(old) if old in project.suggestions else -1
+            project.selected_layout = old
             if old_idx >= 0:
                 self.layout_list.blockSignals(True)
                 self.layout_list.setCurrentRow(old_idx)
                 self.layout_list.blockSignals(False)
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
             return
 
-        if self.project.suggestions:
-            layout = self.project.suggestions[new_idx]
+        if project.suggestions:
+            layout = project.suggestions[new_idx]
             # Restore image assignments from the old layout
             for i, img_idx in old_assignments.items():
                 if i < len(layout.cells):
                     layout.cells[i].image_index = img_idx
-            self.project.selected_layout = layout
+            project.selected_layout = layout
             self.layout_list.blockSignals(True)
             self.layout_list.setCurrentRow(new_idx)
             self.layout_list.blockSignals(False)
@@ -2285,7 +2417,7 @@ class MainWindow(QMainWindow):
         self._sync_dynamic_tree_from_cells()
 
     def _sync_dynamic_tree_from_cells(self) -> None:
-        layout = self.project.selected_layout
+        layout = self._active_project.selected_layout
         tree = getattr(layout, 'tree', None) if layout else None
         if tree is None:
             return
@@ -2301,7 +2433,7 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def _update_canvas_style(self):
-        s = self.project.settings
+        s = self._active_project.settings
         s.bleed_mm = self.bleed_spin.value()
         s.safe_area_mm = self.safe_spin.value()
         s.corner_radius_mm = self.corner_spin.value()
@@ -2310,6 +2442,7 @@ class MainWindow(QMainWindow):
         s.shadow_offset_mm = self.shadow_offset_spin.value()
         s.shadow_opacity = self.shadow_opacity_spin.value()
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
 
     def _soft_fade_recommendation(self, fade_amount: int, spacing_override_enabled: bool, spacing_override_px: int) -> str:
         if fade_amount <= 0:
@@ -2613,7 +2746,8 @@ class MainWindow(QMainWindow):
         self._update_settings()
 
     def _update_text_overlay(self):
-        o = self.project.text_overlay
+        project = self._active_project
+        o = project.text_overlay
         o.text = self.text_edit.text()
         o.font_family = self.font_combo.currentFont().family()
         o.font_bold = self.bold_check.isChecked()
@@ -2621,52 +2755,61 @@ class MainWindow(QMainWindow):
         o.font_size_pt = self.text_size_spin.value()
         o.position = self.text_pos_combo.currentText()
         o.h_align = self.text_align_combo.currentText()
-        o.background_rgb = self.project.settings.background_rgb if self.text_bg_check.isChecked() else None
+        o.background_rgb = project.settings.background_rgb if self.text_bg_check.isChecked() else None
         o.background_opacity = self.text_bg_opacity_spin.value()
         o.stroke_width_px = self.stroke_spin.value()
         o.text_shadow = self.text_shadow_check.isChecked()
         o.text_shadow_offset_px = self.text_shadow_off_spin.value()
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
 
     def _pick_text_color(self):
-        color = QColorDialog.getColor(QColor(*self.project.text_overlay.color_rgb), self)
+        project = self._active_project
+        color = QColorDialog.getColor(QColor(*project.text_overlay.color_rgb), self)
         if color.isValid():
-            self.project.text_overlay.color_rgb = (color.red(), color.green(), color.blue())
+            project.text_overlay.color_rgb = (color.red(), color.green(), color.blue())
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
 
     def _pick_stroke_color(self):
-        color = QColorDialog.getColor(QColor(*self.project.text_overlay.stroke_color_rgb), self)
+        project = self._active_project
+        color = QColorDialog.getColor(QColor(*project.text_overlay.stroke_color_rgb), self)
         if color.isValid():
-            self.project.text_overlay.stroke_color_rgb = (color.red(), color.green(), color.blue())
+            project.text_overlay.stroke_color_rgb = (color.red(), color.green(), color.blue())
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
 
     def _center_text_overlay(self):
-        o = self.project.text_overlay
+        o = self._active_project.text_overlay
         o.pos_x_frac = 0.5
         o.pos_y_frac = 0.5
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
 
     def _apply_text_overlay(self):
         """Commit the current draft overlay to the canvas and reset the form."""
         from copy import deepcopy
-        o = self.project.text_overlay
+        project = self._active_project
+        o = project.text_overlay
         if not o.text.strip():
             return
-        self.project.text_overlays.append(deepcopy(o))
+        project.text_overlays.append(deepcopy(o))
         # Reset draft
-        self.project.text_overlay = type(o)()
+        project.text_overlay = type(o)()
         # Reset form fields (block signals)
         for w in [self.text_edit]:
             w.blockSignals(True); w.setText(''); w.blockSignals(False)
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
-        self.statusBar().showMessage(f'Text overlay added ({len(self.project.text_overlays)} total)')
+        self.statusBar().showMessage(f'Text overlay added ({len(project.text_overlays)} total)')
 
     def _on_text_selected(self, idx: int):
         """Load a committed overlay into the form for editing + show sidebar panel."""
-        if idx < 0 or idx >= len(self.project.text_overlays):
+        project = self._active_project
+        if idx < 0 or idx >= len(project.text_overlays):
             return
-        o = self.project.text_overlays[idx]
+        o = project.text_overlays[idx]
         self.text_edit.blockSignals(True); self.text_edit.setText(o.text); self.text_edit.blockSignals(False)
         self.text_size_spin.blockSignals(True); self.text_size_spin.setValue(o.font_size_pt); self.text_size_spin.blockSignals(False)
         self.statusBar().showMessage(f'Editing text overlay {idx+1} ג€” click Apply to update')
@@ -2674,10 +2817,12 @@ class MainWindow(QMainWindow):
         self._right_stack.setCurrentIndex(2)
 
     def _on_text_remove(self, idx: int):
-        if 0 <= idx < len(self.project.text_overlays):
-            self.project.text_overlays.pop(idx)
+        project = self._active_project
+        if 0 <= idx < len(project.text_overlays):
+            project.text_overlays.pop(idx)
             self._right_stack.setCurrentIndex(0)
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
             self._push_history()
 
     def _update_font_combo_for_script(self, text: str):
@@ -2785,10 +2930,26 @@ class MainWindow(QMainWindow):
             return
         self.swap_btn.setChecked(not self.swap_btn.isChecked())
 
+    def _toggle_layout_edit_shortcut(self):
+        new_state = not self._layout_edit_btn.isChecked()
+        self._layout_edit_btn.setChecked(new_state)
+        if 'layout_edit' in self._actions:
+            self._actions['layout_edit'].setChecked(new_state)
+
     def _on_swap_mode_toggled(self, enabled: bool) -> None:
         self.canvas.set_swap_mode(enabled)
         if enabled:
             self._right_stack.setCurrentIndex(0)
+
+    def _on_layout_edit_mode_toggled(self, enabled: bool) -> None:
+        self.canvas.set_layout_edit_mode(enabled)
+        if enabled:
+            tree = getattr(self.project.selected_layout, 'tree', None) if self.project.selected_layout else None
+            if tree:
+                self._layout_edit_btn.blockSignals(True)
+                self._layout_edit_btn.setChecked(False)
+                self._layout_edit_btn.blockSignals(False)
+                self.canvas.set_layout_edit_mode(False)
 
     def _pan_selected(self, dx: float, dy: float):
         if not self._no_text_focus():
@@ -2873,15 +3034,16 @@ class MainWindow(QMainWindow):
         self._push_history()
 
     def replace_image_in_cell(self, cell_index: int):
-        if not self.project.selected_layout:
+        project = self._active_project
+        if not project.selected_layout:
             return
-        cell = self.project.selected_layout.cells[cell_index]
+        cell = project.selected_layout.cells[cell_index]
         files, _ = QFileDialog.getOpenFileNames(
             self, 'Select replacement image', '', 'Images (*.png *.jpg *.jpeg *.bmp *.webp)')
         if not files:
             return
         file = files[0]
-        self.project.settings.analysis_mode = 'quick'
+        project.settings.analysis_mode = 'quick'
         new_state = ImageState(path=file, analysis_status='quick')
         if getattr(cell, 'slot_type', 'photo') == 'spotify_code':
             probe = [new_state]
@@ -2893,45 +3055,57 @@ class MainWindow(QMainWindow):
                 )
                 return
             new_state.asset_type = 'spotify_code'
-        if cell.image_index is not None and cell.image_index < len(self.project.images):
-            invalidate_cache(self.project.images[cell.image_index].path)
-            self.project.images[cell.image_index] = new_state
+        if cell.image_index is not None and cell.image_index < len(project.images):
+            invalidate_cache(project.images[cell.image_index].path)
+            project.images[cell.image_index] = new_state
+            self._replace_album_session_image(cell.image_index, new_state)
             item = self.image_list.item(cell.image_index)
-            item.setText(Path(file).stem[:18])
-            item.setToolTip(self._analysis_tooltip(file, new_state))
-            item.setIcon(self._make_thumb_icon(file, analyzed=False))
+            if item:
+                item.setText(Path(file).stem[:18])
+                item.setToolTip(self._analysis_tooltip(file, new_state))
+                item.setIcon(self._make_thumb_icon(file, analyzed=False))
         else:
-            self.project.images.append(new_state)
-            cell.image_index = len(self.project.images) - 1
+            project.images.append(new_state)
+            cell.image_index = len(project.images) - 1
+            session = getattr(self, '_active_album_session', None)
+            if session and session.album_state:
+                page = session.album_state.current_page
+                if page is not None:
+                    session.image_states.append(new_state)
+                    page.image_indices.append(len(session.image_states) - 1)
             item = QListWidgetItem(Path(file).stem[:18])
             item.setToolTip(self._analysis_tooltip(file, new_state))
             item.setIcon(self._make_thumb_icon(file, analyzed=False))
             self.image_list.addItem(item)
         self._sync_dynamic_tree_from_cells()
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
 
     def remove_image_from_cell(self, cell_index: int):
-        if not self.project.selected_layout:
+        project = self._active_project
+        if not project.selected_layout:
             return
-        cell = self.project.selected_layout.cells[cell_index]
+        cell = project.selected_layout.cells[cell_index]
         if cell.image_index is None:
             return
         cell.image_index = None
         self._sync_dynamic_tree_from_cells()
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
 
     def _open_color_lab(self, cell_index: int) -> None:
         """Open the Smart Image Editor (Color Lab) for the image in the given cell."""
-        if not self.project.selected_layout:
+        project = self._active_project
+        if not project.selected_layout:
             return
-        cell = self.project.selected_layout.cells[cell_index]
-        if cell.image_index is None or cell.image_index >= len(self.project.images):
+        cell = project.selected_layout.cells[cell_index]
+        if cell.image_index is None or cell.image_index >= len(project.images):
             QMessageBox.information(self, 'Color Lab', 'Please select an image first.')
             return
 
-        state = self.project.images[cell.image_index]
+        state = project.images[cell.image_index]
         image_path = state.path
 
         # Late import so startup is unaffected if the bridge/engine is missing
@@ -2956,7 +3130,8 @@ class MainWindow(QMainWindow):
             zoom=state.zoom,
             rotation=state.rotation,
         )
-        self.project.images[cell.image_index] = new_state
+        project.images[cell.image_index] = new_state
+        self._replace_album_session_image(cell.image_index, new_state)
 
         # Update the sidebar image list entry
         item = self.image_list.item(cell.image_index)
@@ -2966,6 +3141,7 @@ class MainWindow(QMainWindow):
             item.setIcon(self._make_thumb_icon(exported_path, analyzed=False))
 
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
         self.statusBar().showMessage(f'Color Lab: edited image saved to {exported_path}')
 
@@ -2974,13 +3150,14 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def _cell_image_state(self, cell_index: int) -> Optional[ImageState]:
-        layout = self.project.selected_layout
+        project = self._active_project
+        layout = project.selected_layout
         if not layout or cell_index < 0 or cell_index >= len(layout.cells):
             return None
         image_index = layout.cells[cell_index].image_index
-        if image_index is None or image_index < 0 or image_index >= len(self.project.images):
+        if image_index is None or image_index < 0 or image_index >= len(project.images):
             return None
-        return self.project.images[image_index]
+        return project.images[image_index]
 
     def _configured_photoshop_path(self) -> Optional[str]:
         env_path = os.environ.get('PHOTOSHOP_EXE') or os.environ.get('ADOBE_PHOTOSHOP_EXE')
@@ -3309,39 +3486,43 @@ class MainWindow(QMainWindow):
             self._push_history()
 
     def _generate_layout_suggestions(self, use_analysis: bool, select_best: bool = True) -> None:
-        if not self.project.images:
+        project = self._active_project
+        if not project.images:
             QMessageBox.information(self, 'No images', 'Import images first.')
             return
 
         if use_analysis:
-            layout_images = self.project.images
-            self.project.settings.analysis_mode = 'scanned'
+            layout_images = project.images
+            project.settings.analysis_mode = 'scanned'
         else:
             layout_images = [
                 ImageState(path=state.path, asset_type=getattr(state, 'asset_type', 'photo'), rotation=state.rotation, analysis_status=state.analysis_status)
-                for state in self.project.images
+                for state in project.images
             ]
-            self.project.settings.analysis_mode = 'quick'
+            project.settings.analysis_mode = 'quick'
 
-        self.project.suggestions = generate_suggestions(
-            self.project.settings,
-            len(self.project.images),
+        project.suggestions = generate_suggestions(
+            project.settings,
+            len(project.images),
             images=layout_images,
         )
 
-        self._append_user_template_layouts()
+        if getattr(self, '_active_album_session', None) is None:
+            self._append_user_template_layouts()
 
         self.layout_list.clear()
-        canvas_px = self.project.settings.canvas_px
-        for layout in self.project.suggestions:
+        canvas_px = project.settings.canvas_px
+        for layout in project.suggestions:
             label = f'{layout.name}  {layout.score:.0%}' if layout.score > 0 else layout.name
             item = QListWidgetItem(label)
             item.setIcon(QIcon(self._layout_thumbnail(layout, canvas_px)))
             item.setTextAlignment(Qt.AlignCenter)
             self.layout_list.addItem(item)
-        if self.project.suggestions and select_best:
+        if getattr(self, '_active_album_session', None) is not None:
+            self.project.suggestions = project.suggestions
+        if project.suggestions and select_best:
             self.layout_list.setCurrentRow(0)
-            self._apply_face_pan_to_layout(self.project.suggestions[0])
+            self._apply_face_pan_to_layout_for(project.suggestions[0], project)
         self._check_quality_warnings()
 
     def generate_suggestions(self):
@@ -3457,52 +3638,59 @@ class MainWindow(QMainWindow):
 
     def _apply_custom_grid(self):
         """Commit the custom grid: add it to suggestions and select it."""
-        if not self.project.images:
+        project = self._active_project
+        if not project.images:
             QMessageBox.information(self, 'No images', 'Import images first.')
             return
         cols = self.custom_cols_spin.value()
         rows = self.custom_rows_spin.value()
-        n = len(self.project.images)
-        layout = custom_grid_layout(self.project.settings, n, cols=cols, rows=rows)
+        n = len(project.images)
+        layout = custom_grid_layout(project.settings, n, cols=cols, rows=rows)
         # Replace any previous custom grid suggestion, or append
-        self.project.suggestions = [
-            s for s in self.project.suggestions if not s.name.startswith('Custom')
+        project.suggestions = [
+            s for s in project.suggestions if not s.name.startswith('Custom')
         ]
-        self.project.suggestions.append(layout)
+        project.suggestions.append(layout)
+        if getattr(self, '_active_album_session', None) is not None:
+            self.project.suggestions = project.suggestions
         # Rebuild the layout list
         self.layout_list.clear()
-        canvas_px = self.project.settings.canvas_px
-        for sug in self.project.suggestions:
+        canvas_px = project.settings.canvas_px
+        for sug in project.suggestions:
             label = f'{sug.name}  {sug.score:.0%}' if sug.score > 0 else sug.name
             item = QListWidgetItem(label)
             item.setIcon(QIcon(self._layout_thumbnail(sug, canvas_px)))
             item.setTextAlignment(Qt.AlignCenter)
             self.layout_list.addItem(item)
         # Select the custom layout and re-centre faces
-        self.project.selected_layout = layout
-        self._apply_face_pan_to_layout(layout)
+        project.selected_layout = layout
+        self._apply_face_pan_to_layout_for(layout, project)
         self.layout_list.blockSignals(True)
-        self.layout_list.setCurrentRow(len(self.project.suggestions) - 1)
+        self.layout_list.setCurrentRow(len(project.suggestions) - 1)
         self.layout_list.blockSignals(False)
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
         self.statusBar().showMessage(f'Custom grid {cols}ֳ—{rows} applied.')
 
     def _generate_shaped(self, shape: str) -> None:
-        if not self.project.images:
+        project = self._active_project
+        if not project.images:
             QMessageBox.information(self, 'No images', 'Import images first.')
             return
-        layout = generate_shaped_layout(shape, len(self.project.images), self.project.settings)
+        layout = generate_shaped_layout(shape, len(project.images), project.settings)
         if not layout.cells:
             QMessageBox.warning(self, 'Layout failed',
                                 'Could not fit images inside the shape. Try fewer images.')
             return
         # Remove previous layout of same shape if it exists
-        self.project.suggestions = [s for s in self.project.suggestions
-                                     if getattr(s, 'shape', '') != shape]
-        self.project.suggestions.append(layout)
+        project.suggestions = [s for s in project.suggestions
+                               if getattr(s, 'shape', '') != shape]
+        project.suggestions.append(layout)
+        if getattr(self, '_active_album_session', None) is not None:
+            self.project.suggestions = project.suggestions
 
-        canvas_px = self.project.settings.canvas_px
+        canvas_px = project.settings.canvas_px
         label = f'{layout.name}  {layout.score:.0%}'
         item = QListWidgetItem(label)
         item.setIcon(QIcon(self._layout_thumbnail(layout, canvas_px)))
@@ -3510,7 +3698,7 @@ class MainWindow(QMainWindow):
 
         # Rebuild layout list (simpler than incremental update)
         self.layout_list.clear()
-        for s in self.project.suggestions:
+        for s in project.suggestions:
             lbl = f'{s.name}  {s.score:.0%}' if s.score > 0 else s.name
             it = QListWidgetItem(lbl)
             it.setIcon(QIcon(self._layout_thumbnail(s, canvas_px)))
@@ -3518,21 +3706,23 @@ class MainWindow(QMainWindow):
             self.layout_list.addItem(it)
 
         # Select the new shaped layout
-        new_idx = self.project.suggestions.index(layout)
+        new_idx = project.suggestions.index(layout)
         self.layout_list.setCurrentRow(new_idx)
+        self._sync_album_page_data()
         self.statusBar().showMessage(f'{layout.name} layout generated.')
 
     def _create_dynamic_layout(self) -> None:
         """Build a balanced binary-split tree layout and add it to suggestions."""
-        if not self.project.images:
+        project = self._active_project
+        if not project.images:
             QMessageBox.information(self, 'No images', 'Import images first.')
             return
         from app.core.layout_tree_engine import build_tree, cells_from_tree
-        n = len(self.project.images)
-        spacing = self.project.settings.spacing_px
+        n = len(project.images)
+        spacing = project.settings.spacing_px
         # build_tree assigns image_index 0..n-1 on leaves in DFS order
         tree = build_tree(n, spacing=spacing)
-        cw, ch = self.project.settings.canvas_px
+        cw, ch = project.settings.canvas_px
         cells = cells_from_tree(tree, cw, ch)
 
         layout = LayoutSuggestion(name='Dynamic', cells=cells, score=0.0)
@@ -3540,21 +3730,24 @@ class MainWindow(QMainWindow):
         layout.tree = tree
 
         # Replace any previous dynamic layout so the list doesn't grow unbounded
-        self.project.suggestions = [s for s in self.project.suggestions
-                                     if getattr(s, 'tree', None) is None]
-        self.project.suggestions.append(layout)
+        project.suggestions = [s for s in project.suggestions
+                               if getattr(s, 'tree', None) is None]
+        project.suggestions.append(layout)
+        if getattr(self, '_active_album_session', None) is not None:
+            self.project.suggestions = project.suggestions
 
-        canvas_px = self.project.settings.canvas_px
+        canvas_px = project.settings.canvas_px
         self.layout_list.clear()
-        for s in self.project.suggestions:
+        for s in project.suggestions:
             lbl = f'{s.name}  {s.score:.0%}' if s.score > 0 else s.name
             it = QListWidgetItem(lbl)
             it.setIcon(QIcon(self._layout_thumbnail(s, canvas_px)))
             it.setTextAlignment(Qt.AlignCenter)
             self.layout_list.addItem(it)
 
-        new_idx = self.project.suggestions.index(layout)
+        new_idx = project.suggestions.index(layout)
         self.layout_list.setCurrentRow(new_idx)
+        self._sync_album_page_data()
         self.statusBar().showMessage(
             f'Dynamic layout created for {n} image{"s" if n != 1 else ""}. '
             'Drag the white dividers to resize cells.')
@@ -3693,7 +3886,17 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self.project.suggestions):
             return
         layout = self.project.suggestions[index]
+        self._stamp_original_cells(layout)
         self.project.selected_layout = layout
+        # Exit layout edit mode when switching layouts
+        if self._layout_edit_btn.isChecked():
+            self._layout_edit_btn.blockSignals(True)
+            self._layout_edit_btn.setChecked(False)
+            self._layout_edit_btn.blockSignals(False)
+            self.canvas.set_layout_edit_mode(False)
+        has_tree = bool(getattr(layout, 'tree', None))
+        has_shape = bool(getattr(layout, 'shape', ''))
+        self._layout_edit_btn.setVisible(not has_tree and not has_shape)
 
         session = getattr(self, "_active_album_session", None)
         if session and session.album_state and self.canvas.project:
@@ -3794,12 +3997,14 @@ class MainWindow(QMainWindow):
         if state:
             state.zoom = value / 100.0
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
 
     def _rotate_selected(self, delta: int):
         state = self._selected_state()
         if state:
             state.rotation = (state.rotation + delta) % 360
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
             self._push_history()
 
     def _on_adjustment_changed(self):
@@ -3815,6 +4020,7 @@ class MainWindow(QMainWindow):
         state.clahe_enabled = self.clahe_check.isChecked()
         state.clahe_clip = self.clahe_clip_spin.value()
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         # Keep sidebar image panel in sync with sliders
         if self._right_stack.currentIndex() == 1:
             self.image_panel.load_state(state)
@@ -3825,6 +4031,7 @@ class MainWindow(QMainWindow):
         if state:
             self._load_adjustments(state)
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
 
     def _on_preview_original_pressed(self, pressed: bool) -> None:
         idx = self.canvas.selected_cell_index
@@ -3865,31 +4072,39 @@ class MainWindow(QMainWindow):
         if self._right_stack.currentIndex() == 1:
             self.image_panel.load_state(state)
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
 
     def _selected_state(self) -> Optional[ImageState]:
-        if not self.project.selected_layout:
+        project = self._active_project
+        if not project.selected_layout:
             return None
         idx = self.canvas.selected_cell_index
-        if idx < 0 or idx >= len(self.project.selected_layout.cells):
+        if idx < 0 or idx >= len(project.selected_layout.cells):
             return None
-        cell = self.project.selected_layout.cells[idx]
-        if cell.image_index is None or cell.image_index >= len(self.project.images):
+        cell = project.selected_layout.cells[idx]
+        if cell.image_index is None or cell.image_index >= len(project.images):
             return None
-        return self.project.images[cell.image_index]
+        return project.images[cell.image_index]
 
     # -------------------------------------------------------------------
     # Text overlay sync
     # -------------------------------------------------------------------
 
     def _on_text_moved(self):
+        self._sync_album_page_data()
         self._push_history()
 
     def _on_text_content_changed(self, text: str):
         self.text_edit.blockSignals(True)
         self.text_edit.setText(text)
         self.text_edit.blockSignals(False)
+        self._sync_album_page_data()
         self._push_history()
+
+    def _on_cell_pan_changed(self):
+        self._check_quality_warnings()
+        self._sync_album_page_data()
 
     # -------------------------------------------------------------------
     # Background
@@ -3953,30 +4168,34 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def _apply_cell_text(self):
-        if not self.project.selected_layout:
+        project = self._active_project
+        if not project.selected_layout:
             return
         idx = self.canvas.selected_cell_index
-        if idx < 0 or idx >= len(self.project.selected_layout.cells):
+        if idx < 0 or idx >= len(project.selected_layout.cells):
             return
-        cell = self.project.selected_layout.cells[idx]
+        cell = project.selected_layout.cells[idx]
         cell.cell_text = self.cell_text_edit.text()
         cell.cell_text_size_pt = float(self.cell_text_size_spin.value())
         if cell.cell_text:
             cell.image_index = None  # text cell has no image
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
 
     def _pick_cell_text_color(self):
-        if not self.project.selected_layout:
+        project = self._active_project
+        if not project.selected_layout:
             return
         idx = self.canvas.selected_cell_index
-        if idx < 0 or idx >= len(self.project.selected_layout.cells):
+        if idx < 0 or idx >= len(project.selected_layout.cells):
             return
-        cell = self.project.selected_layout.cells[idx]
+        cell = project.selected_layout.cells[idx]
         color = QColorDialog.getColor(QColor(*cell.cell_text_color), self)
         if color.isValid():
             cell.cell_text_color = (color.red(), color.green(), color.blue())
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
 
     # -------------------------------------------------------------------
     # Element library handlers
@@ -4462,9 +4681,11 @@ class MainWindow(QMainWindow):
             width_frac=self.elem_size_spin.value() / 100.0,
             opacity=self.elem_opacity_spin.value() / 100.0,
         )
-        self.project.elements.append(el)
+        project = self._active_project
+        project.elements.append(el)
         self._remember_element_use(self._elem_library_paths[row])
         self.canvas.refresh_preview()
+        self._sync_album_page_data()
         self._push_history()
         self.statusBar().showMessage(f'Element placed: {Path(self._elem_library_paths[row]).name}')
 
@@ -4492,17 +4713,20 @@ class MainWindow(QMainWindow):
 
     def _remove_selected_element(self):
         idx = self.canvas._selected_element
-        if 0 <= idx < len(self.project.elements):
-            self.project.elements.pop(idx)
+        project = self._active_project
+        if 0 <= idx < len(project.elements):
+            project.elements.pop(idx)
             self.canvas._selected_element = -1
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
             self._push_history()
             return True
         return False
 
     def _on_element_selected(self, idx: int):
-        if 0 <= idx < len(self.project.elements):
-            el = self.project.elements[idx]
+        project = self._active_project
+        if 0 <= idx < len(project.elements):
+            el = project.elements[idx]
             self.elem_size_spin.blockSignals(True)
             self.elem_size_spin.setValue(int(el.width_frac * 100))
             self.elem_size_spin.blockSignals(False)
@@ -4512,11 +4736,13 @@ class MainWindow(QMainWindow):
 
     def _update_selected_element(self):
         idx = self.canvas._selected_element
-        if 0 <= idx < len(self.project.elements):
-            el = self.project.elements[idx]
+        project = self._active_project
+        if 0 <= idx < len(project.elements):
+            el = project.elements[idx]
             el.width_frac = self.elem_size_spin.value() / 100.0
             el.opacity = self.elem_opacity_spin.value() / 100.0
             self.canvas.refresh_preview()
+            self._sync_album_page_data()
 
     # -------------------------------------------------------------------
     # Project save / load / new
@@ -4542,7 +4768,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('New project started.')
 
     def save_project_as(self):
-        if not self.project.images and not self.project.selected_layout:
+        project_to_save = self._album_project_snapshot() or self.project
+        if (not project_to_save.images and not project_to_save.selected_layout
+                and not getattr(project_to_save, 'album_state', None)):
             QMessageBox.information(self, 'Nothing to save', 'Add images first.')
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -4550,7 +4778,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            save_project(self.project, path)
+            save_project(project_to_save, path)
             self.statusBar().showMessage(f'Project saved: {path}')
         except Exception as exc:
             QMessageBox.critical(self, 'Save failed', str(exc))
@@ -4570,6 +4798,21 @@ class MainWindow(QMainWindow):
         self.project = project
         self.history = []
         self.history_index = -1
+
+        if getattr(project, 'album_state', None):
+            from app.album_builder.session import AlbumSession
+
+            self.image_list.clear()
+            self.layout_list.clear()
+            session = AlbumSession(
+                image_states=project.images,
+                album_state=project.album_state,
+                settings=project.settings,
+            )
+            self.open_album_session(session)
+            self._push_history()
+            self.statusBar().showMessage(f'Opened album: {path}')
+            return
 
         # Rebuild image list
         self.image_list.clear()
@@ -4641,7 +4884,8 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def export_file(self):
-        if not self.project.selected_layout:
+        project = self._album_project_snapshot() or self.project
+        if not project.selected_layout and not getattr(project, 'album_state', None):
             QMessageBox.information(self, 'No layout', 'Generate a layout first.')
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -4650,23 +4894,28 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            export_project(self.project, path)
+            if getattr(project, 'album_state', None):
+                export_album(project, path)
+            else:
+                export_project(project, path)
             QMessageBox.information(self, 'Exported', f'Saved to:\n{path}')
         except Exception as exc:
             QMessageBox.critical(self, 'Export failed', str(exc))
 
     def open_print_preview(self):
-        if not self.project.selected_layout:
+        album_pages = self._album_preview_pages()
+        project = self._album_project_snapshot() or self.project
+        if not album_pages and not project.selected_layout:
             QMessageBox.information(self, 'No layout', 'Generate a layout first.')
             return
 
-        page = CollagePreviewPage(copy.deepcopy(self.project))
-        adapter = AppRenderAdapter([page])
+        pages = album_pages or [CollagePreviewPage(copy.deepcopy(project))]
+        adapter = AppRenderAdapter(pages)
         controller = PrintPreviewController(adapter, self)
-        controller.settings.dpi = int(self.project.settings.dpi)
-        controller.settings.bleed_mm = float(getattr(self.project.settings, 'bleed_mm', 0.0) or 0.0)
-        controller.settings.safe_area_mm = float(getattr(self.project.settings, 'safe_area_mm', 0.0) or 0.0)
-        controller.set_pages([page], index=0)
+        controller.settings.dpi = int(project.settings.dpi)
+        controller.settings.bleed_mm = float(getattr(project.settings, 'bleed_mm', 0.0) or 0.0)
+        controller.settings.safe_area_mm = float(getattr(project.settings, 'safe_area_mm', 0.0) or 0.0)
+        controller.set_pages(pages, index=0)
         controller.set_quality_warnings(self._print_preview_quality_warnings())
 
         window = PrintPreviewWindow(controller)
@@ -4689,12 +4938,14 @@ class MainWindow(QMainWindow):
             pass
 
     def print_collage(self):
-        if not self.project.selected_layout:
+        album_projects = self._album_page_projects()
+        project = self._album_project_snapshot() or self.project
+        if not album_projects and not project.selected_layout:
             QMessageBox.information(self, 'No layout', 'Generate a layout first.')
             return
         from PySide6.QtGui import QPageLayout
         printer = QPrinter(QPrinter.HighResolution)
-        is_landscape = self.project.settings.width_cm > self.project.settings.height_cm
+        is_landscape = project.settings.width_cm > project.settings.height_cm
         orientation = (QPageLayout.Orientation.Landscape if is_landscape
                        else QPageLayout.Orientation.Portrait)
         page_layout = printer.pageLayout()
@@ -4704,15 +4955,18 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QPrintDialog.DialogCode.Accepted:
             return
         try:
-            pil_img = render_project(self.project)
-            qpix = pil_to_qpixmap(pil_img)
             p = QPainter(printer)
-            rect = p.viewport()
-            scaled = qpix.size().scaled(rect.size(), Qt.KeepAspectRatio)
-            x = (rect.width() - scaled.width()) // 2
-            y = (rect.height() - scaled.height()) // 2
-            p.drawPixmap(x, y, qpix.scaled(scaled, Qt.KeepAspectRatio,
-                                            Qt.SmoothTransformation))
+            for page_idx, page_project in enumerate(album_projects or [project]):
+                if page_idx:
+                    printer.newPage()
+                pil_img = render_project(page_project)
+                qpix = pil_to_qpixmap(pil_img)
+                rect = p.viewport()
+                scaled = qpix.size().scaled(rect.size(), Qt.KeepAspectRatio)
+                x = (rect.width() - scaled.width()) // 2
+                y = (rect.height() - scaled.height()) // 2
+                p.drawPixmap(x, y, qpix.scaled(scaled, Qt.KeepAspectRatio,
+                                                Qt.SmoothTransformation))
             p.end()
         except Exception as exc:
             QMessageBox.critical(self, 'Print failed', str(exc))
@@ -4723,8 +4977,9 @@ class MainWindow(QMainWindow):
 
     def _cell_target_for_image(self, image_index: int) -> tuple:
         """Return the (w_px, h_px) of the cell currently showing this image, or (1,1)."""
-        if self.project.selected_layout:
-            for cell in self.project.selected_layout.cells:
+        project = self._active_project
+        if project.selected_layout:
+            for cell in project.selected_layout.cells:
                 if cell.image_index == image_index:
                     return (max(1, int(round(cell.w))), max(1, int(round(cell.h))))
         return (1, 1)
@@ -4737,7 +4992,7 @@ class MainWindow(QMainWindow):
         ג€¢ Fallback ג†’ (0.5, 0.5) centre.
         """
         natural = self._natural_size(state.path)
-        if self.project.settings.smart_crop_enabled and getattr(state, 'analysis', None):
+        if self._active_project.settings.smart_crop_enabled and getattr(state, 'analysis', None):
             pan_x, pan_y, zoom, _risks = optimize_crop(
                 state.analysis, natural, target, (state.pan_x, state.pan_y), state.zoom)
             state.zoom = zoom
@@ -4795,6 +5050,7 @@ class MainWindow(QMainWindow):
         self.swap_btn.blockSignals(True)
         self.swap_btn.setChecked(False)
         self.swap_btn.blockSignals(False)
+        self._sync_album_page_data()
         self._push_history()
 
     # -------------------------------------------------------------------
@@ -4831,6 +5087,7 @@ class MainWindow(QMainWindow):
         self._view_menu.setTitle(tr('&View'))
         self._advanced_menu.setTitle(tr('&Advanced Collage'))
         self._shape_menu.setTitle(tr('Shaped Collage'))
+        self._tools_menu.setTitle(tr('&Tools'))
         self._actions_menu.setTitle(tr('&Actions'))
         self._lang_menu.setTitle(tr('Language'))
 
@@ -4863,6 +5120,8 @@ class MainWindow(QMainWindow):
         a['shape_circle'].setText(tr('Circle'))
         a['shape_heart'].setText(tr('Heart'))
         a['dynamic_layout'].setText(tr('Dynamic Layout'))
+        a['spotify_search'].setText(tr('Search Spotify song...'))
+        a['spotify_codes'].setText(tr('Open Spotify Codes'))
         a['smart_arrange'].setText(tr('סידור חכם'))
         a['refresh_images'].setText(tr('רענן תמונות'))
         a['scan_selected'].setText(tr('Scan selected photos'))
@@ -5217,6 +5476,34 @@ class MainWindow(QMainWindow):
         self.history_index += 1
         self._restore_snapshot(self.history[self.history_index])
 
+    # -------------------------------------------------------------------
+    # Layout reset
+    # -------------------------------------------------------------------
+
+    def _stamp_original_cells(self, layout) -> None:
+        """Store a snapshot of layout.cells as original_cells if not already set."""
+        if layout is None:
+            return
+        if getattr(layout, 'original_cells', None) is None:
+            import copy
+            layout.original_cells = copy.deepcopy(layout.cells)
+        has_original = (getattr(layout, 'original_cells', None) is not None
+                        and not getattr(layout, 'tree', None))
+        self.reset_layout_btn.setEnabled(has_original)
+
+    def reset_layout(self) -> None:
+        """Restore cell geometry to the snapshot taken when this layout was first selected."""
+        if not self.project or not self.project.selected_layout:
+            return
+        layout = self.project.selected_layout
+        orig = getattr(layout, 'original_cells', None)
+        if orig is None:
+            return
+        import copy
+        layout.cells = copy.deepcopy(orig)
+        self.canvas.refresh_preview()
+        self._push_history()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, '_depth_toast') and self._depth_toast.isVisible():
@@ -5273,6 +5560,10 @@ class MainWindow(QMainWindow):
         self._album_strip.set_session(session)
         self._album_strip.show()
 
+        # Show album images sidebar in right panel
+        self._album_image_list.set_images(session.image_states)
+        self._album_images_grp.show()
+
         # Show first page immediately
         self._show_main_album_page(0)
 
@@ -5280,6 +5571,7 @@ class MainWindow(QMainWindow):
         session = getattr(self, '_active_album_session', None)
         if session is None:
             return
+        self._sync_album_page_data()
         # Update state + strip selection immediately (no render yet)
         if session.album_state:
             session.album_state.current_page_index = idx
@@ -5298,6 +5590,9 @@ class MainWindow(QMainWindow):
         session = getattr(self, '_active_album_session', None)
         if session is None:
             return
+
+        if session.album_state and session.album_state.current_page_index != idx:
+            self._sync_album_page_data()
 
         # Use cached page-view ProjectState when possible
         page_project = self._album_page_cache.get(idx)
@@ -5325,6 +5620,7 @@ class MainWindow(QMainWindow):
         self.canvas.refresh_preview()
         self._album_strip.select(idx)
         self._rebuild_layout_list(select=page_project.selected_layout)
+        self.on_cell_selected(self.canvas.selected_cell_index)
 
     def _get_page_suggestions(self, page_project, page_idx):
         """Generate layout alternatives for the current page."""
@@ -5343,10 +5639,130 @@ class MainWindow(QMainWindow):
         except Exception:
             return []
 
+    @property
+    def _active_project(self):
+        """Return canvas.project (album page) when album is open, else self.project.
+
+        Use this in ALL editing methods so they operate on the correct context.
+        """
+        if getattr(self, '_active_album_session', None) is not None and self.canvas.project is not None:
+            return self.canvas.project
+        return self.project
+
+    def _sync_album_page_data(self) -> None:
+        """Persist canvas.project overlays + elements back to the current AlbumPage.
+
+        Called after any overlay/element change when album mode is active.
+        """
+        session = getattr(self, '_active_album_session', None)
+        if session is None or session.album_state is None:
+            return
+        idx = session.album_state.current_page_index
+        if idx < 0 or idx >= session.album_state.page_count:
+            return
+        page = session.album_state.pages[idx]
+        pp = self.canvas.project
+        if pp is None:
+            return
+        page.layout = pp.selected_layout
+        page.text_overlays = list(pp.text_overlays)
+        page.elements = list(pp.elements)
+        if hasattr(self, "_album_page_cache"):
+            self._album_page_cache[idx] = pp
+
+    def _replace_album_session_image(self, page_image_index: int, state: ImageState) -> None:
+        """Replace the backing AlbumSession image for a local page image index."""
+        session = getattr(self, '_active_album_session', None)
+        if session is None or session.album_state is None:
+            return
+        page = session.album_state.current_page
+        if page is None or page_image_index < 0 or page_image_index >= len(page.image_indices):
+            return
+        global_idx = page.image_indices[page_image_index]
+        if 0 <= global_idx < len(session.image_states):
+            session.image_states[global_idx] = state
+
+    def _album_project_snapshot(self) -> Optional[ProjectState]:
+        """Return a serialisable/exportable project for the active album."""
+        session = getattr(self, '_active_album_session', None)
+        if session is None or session.album_state is None:
+            return None
+        self._sync_album_page_data()
+        project = ProjectState()
+        project.settings = session.make_settings()
+        project.images = list(session.image_states)
+        project.album_state = session.album_state
+        return project
+
+    def _album_page_projects(self) -> List[ProjectState]:
+        session = getattr(self, '_active_album_session', None)
+        if session is None or session.album_state is None:
+            return []
+        self._sync_album_page_data()
+        projects: List[ProjectState] = []
+        for idx in range(session.album_state.page_count):
+            page_project = session.make_page_project(idx)
+            if page_project is not None and page_project.selected_layout is not None:
+                projects.append(page_project)
+        return projects
+
+    def _album_preview_pages(self) -> List[CollagePreviewPage]:
+        return [CollagePreviewPage(copy.deepcopy(p), page_id=f'album-{i + 1}')
+                for i, p in enumerate(self._album_page_projects())]
+
+    def _replace_cell_image_with_path(self, cell_idx: int, image_path: str) -> None:
+        """Handle album-image drag-drop: replace or swap cell image."""
+        ap = self._active_project
+        if not ap or not ap.selected_layout:
+            return
+        cells = ap.selected_layout.cells
+        if cell_idx >= len(cells):
+            return
+        cell = cells[cell_idx]
+        if cell.image_index is None or cell.image_index >= len(ap.images):
+            return
+
+        target_state = ap.images[cell.image_index]
+        session = getattr(self, '_active_album_session', None)
+
+        if session:
+            # Find if dragged image is already on this page → swap cells
+            for src_idx, img in enumerate(ap.images):
+                if img.path == image_path and src_idx != cell.image_index:
+                    # Swap within the same page
+                    ap.images[cell.image_index], ap.images[src_idx] = (
+                        ap.images[src_idx], ap.images[cell.image_index]
+                    )
+                    self.canvas.refresh_preview()
+                    self._push_history()
+                    return
+
+            # Dragged from another page: find the source ImageState
+            dragged_state = next(
+                (s for s in session.image_states if s.path == image_path), None
+            )
+            if dragged_state is not None:
+                ap.images[cell.image_index] = dragged_state
+                # Refresh the sidebar (order may have changed)
+                self._album_image_list.set_images(session.image_states)
+                self.canvas.refresh_preview()
+                self._push_history()
+                return
+
+        # Fallback: treat as a new file path
+        from app.models.project import ImageState
+        from app.utils.image_utils import invalidate_cache
+        invalidate_cache(target_state.path)
+        ap.images[cell.image_index] = ImageState(path=image_path, analysis_status='quick')
+        self.canvas.refresh_preview()
+        self._push_history()
+
     def _close_album_view(self) -> None:
         """Remove album strip and return canvas to normal single-collage mode."""
+        self._sync_album_page_data()  # persist final edits
         self._active_album_session = None
         self._album_strip.hide()
+        self._album_images_grp.hide()  # hide sidebar when leaving album mode
         self.canvas._fast_preview_max = 1400  # restore full quality
         self.canvas.project = self.project
         self.canvas.refresh_preview()

@@ -114,9 +114,10 @@ class CollageCanvas(QWidget):
     cellSelected        = Signal(int)
     swapPerformed       = Signal()
     cellPanChanged      = Signal()          # emitted after cell image is panned/zoomed
-    replaceImageRequested = Signal(int)
-    removeImageFromCell = Signal(int)
-    editImageInColorLab = Signal(int)   # right-click → Open in Color Lab
+    replaceImageRequested  = Signal(int)
+    replaceImageWithPath   = Signal(int, str)   # (cell_idx, image_path) — album drag-drop
+    removeImageFromCell    = Signal(int)
+    editImageInColorLab    = Signal(int)   # right-click → Open in Color Lab
     editImageInPhotoshop = Signal(int)  # right-click -> Open original file in Photoshop
     textMoved           = Signal()          # any overlay moved
     textContentChanged  = Signal(str)       # draft edited inline
@@ -125,6 +126,7 @@ class CollageCanvas(QWidget):
     elementSelected     = Signal(int)       # element overlay clicked
     displayZoomChanged  = Signal(float)    # canvas display-zoom changed
     panChanged          = Signal()         # canvas pan offset changed
+    layoutEdited        = Signal()          # emitted when user finishes dragging a cell divider
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -152,6 +154,9 @@ class CollageCanvas(QWidget):
         self.last_pos: QPoint = QPoint()
         self.scale_x: float = 1.0
         self.scale_y: float = 1.0
+        self._drag_hover_cell: int = -1  # cell highlighted during album image drag
+
+        self.setAcceptDrops(True)
 
         self.swap_mode: bool = False
         self._swap_source: int = -1
@@ -174,6 +179,14 @@ class CollageCanvas(QWidget):
         self._tree_drag_start_canvas: Tuple[float, float] = (0.0, 0.0)
         self._tree_drag_start_ratio: float = 0.0
         self._tree_hover_node = None            # SplitNode under mouse (for cursor/highlight)
+
+        # Flat cell-divider drag state (non-tree layouts: templates + algorithmic)
+        self._flat_div_fingerprint = None       # (orientation, frozenset(before), frozenset(after)) or None
+        self._flat_div_orig_cells = None        # deep-copy of cells at drag start
+        self._flat_div_start_canvas: Tuple[float, float] = (0.0, 0.0)
+        # Layout edit mode — when True, dividers take priority over image editing
+        self._layout_edit_mode: bool = False
+        self._flat_div_hover = None             # CellDivider under mouse (for cursor/highlight)
 
         # Element overlay state
         self._element_rects: List[tuple] = []   # (x,y,w,h) in pixmap coords per element
@@ -203,6 +216,20 @@ class CollageCanvas(QWidget):
         self.swap_mode = enabled
         self._swap_source = -1
         self.setCursor(QCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor))
+        self.update()
+
+    def set_layout_edit_mode(self, enabled: bool) -> None:
+        """Toggle layout-edit mode (drag cell borders to resize).
+        When active, image pan/zoom/FT interactions are suspended."""
+        self._layout_edit_mode = enabled
+        # Reset any in-progress interaction state
+        self._flat_div_fingerprint = None
+        self._flat_div_orig_cells = None
+        self._flat_div_hover = None
+        self.drag_active = False
+        self._ft_handle = None
+        self.selected_cell_index = -1
+        self.setCursor(QCursor(Qt.ArrowCursor))
         self.update()
 
     def refresh_preview(self) -> None:
@@ -1210,6 +1237,49 @@ class CollageCanvas(QWidget):
                         for dx2 in (-7, 0, 7):
                             painter.drawEllipse(cx2 + dx2 - 2, ly - 2, 4, 4)
 
+        # Flat cell dividers (non-tree layouts: templates + algorithmic)
+        elif not tree and self.project and self.project.selected_layout and not getattr(self.project.selected_layout, 'shape', ''):
+            from app.core.cell_dividers import compute_cell_dividers, find_divider_by_fingerprint
+            cells = self.project.selected_layout.cells
+            if cells:
+                flat_divs = compute_cell_dividers(cells)
+                for div in flat_divs:
+                    fp = div.fingerprint
+                    is_dragging = (self._flat_div_fingerprint is not None
+                                   and fp == self._flat_div_fingerprint)
+                    is_hovering = (self._flat_div_hover is not None
+                                   and fp == self._flat_div_hover.fingerprint)
+                    is_active = is_dragging or is_hovering
+                    line_color = QColor(255, 255, 255, 220 if is_active else 120)
+                    line_width  = 4 if is_active else 2
+                    painter.setPen(QPen(line_color, line_width))
+                    if div.orientation == 'V':
+                        wr_div = self._canvas_rect_to_widget(div.position - 8, div.start, 16, div.end - div.start)
+                        lx = wr_div.x() + wr_div.width() // 2
+                        painter.drawLine(lx, wr_div.y(), lx, wr_div.y() + wr_div.height())
+                        if is_active:
+                            cy2 = wr_div.y() + wr_div.height() // 2
+                            painter.setPen(QPen(QColor(255, 255, 255, 230), 1))
+                            painter.setBrush(QColor(80, 80, 80, 180))
+                            painter.drawRoundedRect(lx - 5, cy2 - 14, 10, 28, 3, 3)
+                            painter.setBrush(QColor(220, 220, 220, 230))
+                            painter.setPen(Qt.NoPen)
+                            for dy2 in (-7, 0, 7):
+                                painter.drawEllipse(lx - 2, cy2 + dy2 - 2, 4, 4)
+                    else:  # 'H'
+                        wr_div = self._canvas_rect_to_widget(div.start, div.position - 8, div.end - div.start, 16)
+                        ly = wr_div.y() + wr_div.height() // 2
+                        painter.drawLine(wr_div.x(), ly, wr_div.x() + wr_div.width(), ly)
+                        if is_active:
+                            cx2 = wr_div.x() + wr_div.width() // 2
+                            painter.setPen(QPen(QColor(255, 255, 255, 230), 1))
+                            painter.setBrush(QColor(80, 80, 80, 180))
+                            painter.drawRoundedRect(cx2 - 14, ly - 5, 28, 10, 3, 3)
+                            painter.setBrush(QColor(220, 220, 220, 230))
+                            painter.setPen(Qt.NoPen)
+                            for dx2 in (-7, 0, 7):
+                                painter.drawEllipse(cx2 + dx2 - 2, ly - 2, 4, 4)
+
         # Text overlay handles
         for idx, wr in self._all_text_widget_rects():
             if self._text_drag_index == idx:
@@ -1302,9 +1372,73 @@ class CollageCanvas(QWidget):
                 self.rect().adjusted(0,4,0,-self.rect().height()+22),
                 Qt.AlignCenter, 'SWAP MODE – click first cell, then second cell')
 
+        if self._layout_edit_mode:
+            # Top banner
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(30, 120, 220, 200))
+            banner = self.rect().adjusted(0, 0, 0, -self.rect().height() + 24)
+            painter.drawRect(banner)
+            painter.setPen(QColor(255, 255, 255, 240))
+            font = painter.font()
+            font.setBold(True)
+            font.setPointSize(10)
+            painter.setFont(font)
+            painter.drawText(banner, Qt.AlignCenter,
+                             'Layout Edit Mode  —  drag borders to resize cells')
+
+        # Highlight cell being hovered during album image drag
+        if self._drag_hover_cell >= 0 and self.project and self.project.selected_layout:
+            cells = self.project.selected_layout.cells
+            if self._drag_hover_cell < len(cells):
+                cell = cells[self._drag_hover_cell]
+                r = self._cell_rect_in_widget(cell)
+                if not r.isEmpty():
+                    painter.setPen(QPen(QColor(0, 200, 100, 220), 3))
+                    painter.setBrush(QColor(0, 180, 80, 40))
+                    painter.drawRect(r)
+
     # ------------------------------------------------------------------
     # Mouse
     # ------------------------------------------------------------------
+
+    # ── Album image drag-drop ─────────────────────────────────────────────────
+
+    _ALBUM_IMAGE_MIME = 'application/x-colai-image-path'
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(self._ALBUM_IMAGE_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasFormat(self._ALBUM_IMAGE_MIME):
+            # Highlight the cell under the cursor
+            pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+            self._drag_hover_cell = self._find_cell_at(pos)
+            self.update()
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._drag_hover_cell = -1
+        self.update()
+
+    def dropEvent(self, event) -> None:
+        if event.mimeData().hasFormat(self._ALBUM_IMAGE_MIME):
+            self._drag_hover_cell = -1
+            self.update()
+            path = bytes(event.mimeData().data(self._ALBUM_IMAGE_MIME)).decode('utf-8')
+            pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+            cell_idx = self._find_cell_at(pos)
+            if cell_idx >= 0:
+                self.replaceImageWithPath.emit(cell_idx, path)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.LeftButton:
@@ -1391,6 +1525,25 @@ class CollageCanvas(QWidget):
                     self._ft_cell_orig = (cell.x, cell.y, cell.w, cell.h,
                                           1.0, 0.5, 0.5)
             return
+
+        # Layout edit mode — only cell-divider dragging is active
+        if self._layout_edit_mode and self.project and self.project.selected_layout:
+            tree = self._get_active_tree()
+            if not tree and not getattr(self.project.selected_layout, 'shape', ''):
+                from app.core.cell_dividers import compute_cell_dividers, hit_cell_divider
+                from copy import deepcopy
+                cells = self.project.selected_layout.cells
+                if cells:
+                    cx, cy = self._widget_to_canvas(pos)
+                    flat_divs = compute_cell_dividers(cells)
+                    hit_div = hit_cell_divider(flat_divs, cx, cy)
+                    if hit_div is not None:
+                        self._flat_div_fingerprint = hit_div.fingerprint
+                        self._flat_div_orig_cells = deepcopy(cells)
+                        self._flat_div_start_canvas = (cx, cy)
+                        self.setCursor(QCursor(
+                            Qt.SplitVCursor if hit_div.orientation == 'H' else Qt.SplitHCursor))
+            return  # all other interactions blocked in layout edit mode
 
         # Tree divider drag — must be checked before cell selection
         tree = self._get_active_tree()
@@ -1489,6 +1642,43 @@ class CollageCanvas(QWidget):
         delta = pos - self.last_pos
         self.last_pos = pos
 
+        # Layout edit mode — only flat divider drag + hover; skip all image interactions
+        if self._layout_edit_mode:
+            # Active drag
+            if self._flat_div_fingerprint is not None and self.project and self.project.selected_layout:
+                from app.core.cell_dividers import apply_divider_drag
+                cells = self.project.selected_layout.cells
+                if cells and self._flat_div_orig_cells:
+                    cx, cy = self._widget_to_canvas(pos)
+                    sx, sy = self._flat_div_start_canvas
+                    orientation = self._flat_div_fingerprint[0]
+                    total_delta = (cx - sx) if orientation == 'V' else (cy - sy)
+                    apply_divider_drag(cells, self._flat_div_orig_cells,
+                                       self._flat_div_fingerprint, total_delta)
+                    self._preview_pixmap = self._build_full_pixmap()
+                    self.update()
+                return
+            # Hover cursor
+            if self.project and self.project.selected_layout:
+                tree = self._get_active_tree()
+                if not tree and not getattr(self.project.selected_layout, 'shape', ''):
+                    from app.core.cell_dividers import compute_cell_dividers, hit_cell_divider
+                    cells = self.project.selected_layout.cells
+                    if cells:
+                        cx, cy = self._widget_to_canvas(pos)
+                        flat_divs = compute_cell_dividers(cells)
+                        hover_div = hit_cell_divider(flat_divs, cx, cy)
+                        old_fp = self._flat_div_hover.fingerprint if self._flat_div_hover else None
+                        new_fp = hover_div.fingerprint if hover_div else None
+                        if old_fp != new_fp:
+                            self._flat_div_hover = hover_div
+                            self.setCursor(QCursor(
+                                Qt.SplitVCursor if (hover_div and hover_div.orientation == 'H')
+                                else Qt.SplitHCursor if hover_div
+                                else Qt.ArrowCursor))
+                            self.update()
+            return
+
         # Tree divider drag
         if self._tree_drag_node is not None and self.project:
             tree = self._get_active_tree()
@@ -1506,6 +1696,21 @@ class CollageCanvas(QWidget):
                 node.ratio = clamp_ratio(node, new_ratio)
                 layout = self.project.selected_layout
                 layout.cells = self._dynamic_cells_from_tree_preserving_images(tree, cw, ch)
+                self._preview_pixmap = self._build_full_pixmap()
+                self.update()
+            return
+
+        # Flat cell divider drag
+        if self._flat_div_fingerprint is not None and self.project and self.project.selected_layout:
+            from app.core.cell_dividers import compute_cell_dividers, apply_divider_drag, find_divider_by_fingerprint
+            cells = self.project.selected_layout.cells
+            if cells and self._flat_div_orig_cells:
+                cx, cy = self._widget_to_canvas(pos)
+                sx, sy = self._flat_div_start_canvas
+                orientation = self._flat_div_fingerprint[0]
+                total_delta = (cx - sx) if orientation == 'V' else (cy - sy)
+                apply_divider_drag(cells, self._flat_div_orig_cells,
+                                   self._flat_div_fingerprint, total_delta)
                 self._preview_pixmap = self._build_full_pixmap()
                 self.update()
             return
@@ -1574,6 +1779,33 @@ class CollageCanvas(QWidget):
             else:
                 if self._tree_hover_node is not None:
                     self._tree_hover_node = None
+                    self.update()
+
+                # Flat cell divider hover (non-tree layouts)
+                if (self.project and self.project.selected_layout
+                        and not getattr(self.project.selected_layout, 'shape', '')):
+                    from app.core.cell_dividers import compute_cell_dividers, hit_cell_divider
+                    cells = self.project.selected_layout.cells
+                    if cells:
+                        cx, cy = self._widget_to_canvas(pos)
+                        flat_divs = compute_cell_dividers(cells)
+                        hover_div = hit_cell_divider(flat_divs, cx, cy)
+                        old_fp = self._flat_div_hover.fingerprint if self._flat_div_hover else None
+                        new_fp = hover_div.fingerprint if hover_div else None
+                        if old_fp != new_fp:
+                            self._flat_div_hover = hover_div
+                            if hover_div is not None:
+                                self.setCursor(QCursor(
+                                    Qt.SplitVCursor if hover_div.orientation == 'H'
+                                    else Qt.SplitHCursor))
+                            else:
+                                self.setCursor(QCursor(Qt.ArrowCursor))
+                            self.update()
+                    elif self._flat_div_hover is not None:
+                        self._flat_div_hover = None
+                        self.update()
+                elif self._flat_div_hover is not None:
+                    self._flat_div_hover = None
                     self.update()
 
             ft_elem = self._find_ft_element_at(pos)
@@ -1676,11 +1908,30 @@ class CollageCanvas(QWidget):
         if self._compare_preview_cell >= 0:
             self.clear_compare_preview()
             return
+        # Layout edit mode — only flat divider release matters
+        if self._layout_edit_mode:
+            if self._flat_div_fingerprint is not None:
+                self._flat_div_fingerprint = None
+                self._flat_div_orig_cells = None
+                self.setCursor(QCursor(Qt.ArrowCursor))
+                self.refresh_preview()
+                self.layoutEdited.emit()
+            return
         # Tree divider drag release
         if self._tree_drag_node is not None:
             self._tree_drag_node = None
             self.setCursor(QCursor(Qt.ArrowCursor))
             self.refresh_preview()
+            self.layoutEdited.emit()
+            return
+
+        # Flat cell divider drag release
+        if self._flat_div_fingerprint is not None:
+            self._flat_div_fingerprint = None
+            self._flat_div_orig_cells = None
+            self.setCursor(QCursor(Qt.ArrowCursor))
+            self.refresh_preview()
+            self.layoutEdited.emit()
             return
 
         # Element drag/rotate release

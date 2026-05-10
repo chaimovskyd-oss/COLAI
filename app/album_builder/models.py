@@ -26,13 +26,16 @@ class PhotoMeta:
 
 @dataclass
 class AlbumPage:
-    """One album page: image assignments + chosen layout."""
+    """One album page: image assignments + chosen layout + per-page overlays."""
 
     page_index: int
-    image_indices: List[int] = field(default_factory=list)  # indices into project.images
+    image_indices: List[int] = field(default_factory=list)  # indices into session.image_states
     layout: Any = None                  # LayoutSuggestion set during placement
     locked: bool = False
     label: str = ''
+    # Per-page content — serialised and restored with the album
+    text_overlays: List[Any] = field(default_factory=list)
+    elements: List[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -46,6 +49,8 @@ class AlbumSettings:
     hero_threshold: float = 0.75        # importance score above which = hero
     title: str = 'האלבום שלי'
     target_pages: int = 0              # 0 = auto; >0 = user-chosen page count
+    margin_mm: float = 5.0             # page margin in mm
+    spacing_mm: float = 2.0            # inter-cell spacing in mm
 
 
 # density preset limits

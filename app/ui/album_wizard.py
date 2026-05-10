@@ -302,6 +302,32 @@ class _SettingsPanel(QWidget):
         f2.addRow('', self._hero_chk)
         vlay.addWidget(density_grp)
 
+        # Margins & spacing
+        layout_grp = self._group('שוליים ומרווחים')
+        f3 = QFormLayout(layout_grp)
+        f3.setSpacing(6)
+
+        self._margin_spin = QSpinBox()
+        self._margin_spin.setRange(0, 40)
+        self._margin_spin.setValue(5)
+        self._margin_spin.setSuffix(' מ"מ')
+        self._margin_spin.setStyleSheet(
+            'QSpinBox{background:#1e2a38;color:#c0d0e8;border:1px solid #2a3a50;'
+            'border-radius:4px;padding:2px 4px;font-size:11px;}'
+        )
+        f3.addRow(QLabel('שוליים', styleSheet=_LABEL), self._margin_spin)
+
+        self._spacing_spin = QSpinBox()
+        self._spacing_spin.setRange(0, 20)
+        self._spacing_spin.setValue(2)
+        self._spacing_spin.setSuffix(' מ"מ')
+        self._spacing_spin.setStyleSheet(
+            'QSpinBox{background:#1e2a38;color:#c0d0e8;border:1px solid #2a3a50;'
+            'border-radius:4px;padding:2px 4px;font-size:11px;}'
+        )
+        f3.addRow(QLabel('מרווח בין תמונות', styleSheet=_LABEL), self._spacing_spin)
+        vlay.addWidget(layout_grp)
+
         vlay.addStretch(1)
 
         # Stats
@@ -371,10 +397,12 @@ class _SettingsPanel(QWidget):
             density=density,
             hero_pages=self._hero_chk.isChecked(),
             target_pages=self._pages_spin.value(),
+            margin_mm=float(self._margin_spin.value()),
+            spacing_mm=float(self._spacing_spin.value()),
         )
 
     def apply_to_settings(self, settings) -> None:
-        """Write chosen page size + DPI into a ProjectSettings object."""
+        """Write chosen page size, DPI, margins and spacing into a ProjectSettings object."""
         sizes = [
             (21.0, 29.7), (29.7, 21.0), (29.7, 42.0),
             (20.0, 20.0), (30.0, 30.0),
@@ -384,6 +412,8 @@ class _SettingsPanel(QWidget):
         settings.width_cm = w
         settings.height_cm = h
         settings.dpi = dpis[self._dpi_combo.currentIndex()]
+        settings.margin_mm = float(self._margin_spin.value())
+        settings.spacing_mm = float(self._spacing_spin.value())
 
     def _on_generate(self) -> None:
         self.generate_clicked.emit(self.album_settings())
