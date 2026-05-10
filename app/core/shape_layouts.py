@@ -97,108 +97,81 @@ def pack_cells_in_shape(
     mask: Image.Image,
     n_images: int,
     spacing: int = 10,
-    inner_gap: int = 8,
+    inner_gap: int = 8,  # kept for API compatibility
 ) -> List[CellRect]:
-    """Pack n_images rectangular cells inside the white area of mask.
+    """Pack n_images cells filling the shape's bounding box with a uniform grid.
 
-    Tries many row-count configurations and for each one also tries an
-    aspect-ratio-guided column distribution in addition to the width-proportional
-    distribution.  The winner is picked by a combined score of fill-ratio (how
-    much of the shape is covered) and aspect-ratio quality (cells close to 1:1
-    score higher than thin slivers).
+    Creates a regular rows×cols grid inside the tight bounding box of the mask.
+    The shape mask is applied *after* rendering (apply_shape_mask in the pipeline),
+    so cells near the boundary are automatically clipped to the shape — eliminating
+    empty gaps at the edges without any per-row width sampling.
+
+    Picks the grid configuration whose cell aspect ratio is closest to 4:3.
+    Centers the last row when it has fewer cells than the other rows.
     """
     if n_images <= 0:
         return []
 
     w, h = mask.size
-    mask_arr = np.array(mask)
-    shape_area = float((mask_arr > 128).sum()) or 1.0
+    mask_arr = np.array(mask) > 128
+
+    # Tight bounding box of the shape
+    rows_any = np.any(mask_arr, axis=1)
+    cols_any = np.any(mask_arr, axis=0)
+    if not rows_any.any():
+        return []
+    y_min = int(np.argmax(rows_any))
+    y_max = int(len(rows_any) - np.argmax(rows_any[::-1]) - 1)
+    x_min = int(np.argmax(cols_any))
+    x_max = int(len(cols_any) - np.argmax(cols_any[::-1]) - 1)
+
+    bbox_w = float(x_max - x_min)
+    bbox_h = float(y_max - y_min)
+    if bbox_w <= 0 or bbox_h <= 0:
+        return []
+
+    # Target aspect ratio: 4:3 landscape (typical photo)
+    target_ar = 4.0 / 3.0
 
     best_score = -1.0
-    best_cells: List[CellRect] = []
+    best_cfg = (1, n_images)
 
-    # Try up to a generous number of rows so larger image counts can form
-    # proper grids instead of thin vertical strips.
-    max_rows = min(n_images, max(8, int(math.ceil(math.sqrt(n_images)) * 2)))
+    for n_rows in range(1, n_images + 1):
+        n_cols = math.ceil(n_images / n_rows)
+        cw = (bbox_w - spacing * (n_cols - 1)) / n_cols
+        ch = (bbox_h - spacing * (n_rows - 1)) / n_rows
+        if cw < 20 or ch < 20:
+            continue
+        ar = cw / max(1.0, ch)
+        # Penalise deviation from target on a log scale
+        score = math.exp(-abs(math.log(ar / target_ar)) * 1.2)
+        if score > best_score:
+            best_score = score
+            best_cfg = (n_rows, n_cols)
 
-    for n_rows in range(1, max_rows + 1):
-        row_h_f = (h - (n_rows - 1) * spacing) / n_rows
-        if row_h_f < 20:
+    n_rows, n_cols = best_cfg
+    cw = (bbox_w - spacing * (n_cols - 1)) / n_cols
+    ch = (bbox_h - spacing * (n_rows - 1)) / n_rows
+
+    cells: List[CellRect] = []
+    placed = 0
+    for row in range(n_rows):
+        if placed >= n_images:
             break
+        cells_this_row = min(n_cols, n_images - placed)
+        # Centre the last partial row horizontally inside the bounding box
+        offset_x = (n_cols - cells_this_row) * (cw + spacing) / 2.0
+        for col in range(cells_this_row):
+            x = x_min + offset_x + col * (cw + spacing)
+            y = y_min + row * (ch + spacing)
+            cells.append(CellRect(
+                x=round(x), y=round(y),
+                w=max(1, round(cw)), h=max(1, round(ch)),
+                image_index=placed,
+            ))
+            placed += 1
 
-        # Gather row spans (use 3 sample points, take widest)
-        spans: List[Optional[Tuple[int, int]]] = []
-        for r in range(n_rows):
-            y_top = r * (row_h_f + spacing)
-            best_span = None
-            for frac in (0.25, 0.5, 0.75):
-                sp = _row_span(mask_arr, int(y_top + row_h_f * frac), inner_gap)
-                if sp and (best_span is None or
-                           (sp[1] - sp[0]) > (best_span[1] - best_span[0])):
-                    best_span = sp
-            spans.append(best_span)
-
-        if any(s is None for s in spans):
-            continue
-
-        widths = [float(s[1] - s[0]) for s in spans]  # type: ignore[index]
-        if sum(widths) == 0:
-            continue
-
-        # Strategy 1: distribute proportionally to row widths (original)
-        dist_prop = _distribute(n_images, widths)
-
-        # Strategy 2: aspect-ratio-guided — each row gets roughly as many cells
-        # as needed to produce ~1:1 cells (natural_n[r] ≈ row_width / row_height)
-        natural_n = [max(1, round(wi / max(1.0, row_h_f))) for wi in widths]
-        dist_ar = _distribute(n_images, [float(x) for x in natural_n])
-
-        # Evaluate both distributions (skip duplicates)
-        seen: set = set()
-        for cells_per_row in (dist_prop, dist_ar):
-            key = tuple(cells_per_row)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            cells: List[CellRect] = []
-            ok = True
-            total_log_ar = 0.0
-
-            for r, (n_here, span) in enumerate(zip(cells_per_row, spans)):
-                if n_here <= 0:
-                    continue
-                y_top = r * (row_h_f + spacing)
-                xl, xr = span  # type: ignore[misc]
-                avail_w = xr - xl
-                cell_w = (avail_w - (n_here - 1) * spacing) / n_here
-                if cell_w < 8:
-                    ok = False
-                    break
-                ar = cell_w / max(1.0, row_h_f)
-                # log(ar): 0 for square, negative for portrait, positive for landscape
-                total_log_ar += abs(math.log(max(0.05, ar)))
-                for c in range(n_here):
-                    x = xl + c * (cell_w + spacing)
-                    cells.append(CellRect(
-                        x=round(x), y=round(y_top),
-                        w=max(1, round(cell_w)), h=max(1, round(row_h_f)),
-                        image_index=len(cells),
-                    ))
-
-            if ok and len(cells) == n_images:
-                cell_area = sum(c.w * c.h for c in cells)
-                fill_score = cell_area / shape_area
-                # Aspect-ratio quality: e^(-deviation) → 1.0 for square, decays for skewed
-                avg_log_ar = total_log_ar / max(1, n_rows)
-                ar_quality = math.exp(-avg_log_ar * 1.5)
-                # Combined: weight fill and aspect ratio equally
-                score = 0.5 * fill_score + 0.5 * ar_quality
-                if score > best_score:
-                    best_score = score
-                    best_cells = cells
-
-    return best_cells
+    return cells
 
 
 # ---------------------------------------------------------------------------

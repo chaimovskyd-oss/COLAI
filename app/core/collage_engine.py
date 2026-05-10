@@ -528,7 +528,8 @@ def _circle_ring_collage_layout(settings: ProjectSettings, image_count: int) -> 
     else:
         inner_ratio = 0.46
     inner_r = outer_r * inner_ratio
-    gap_angle = 2.6 if image_count <= 5 else (1.8 if image_count <= 12 else 1.2)
+    # Larger gap makes the separation between segments clearly visible and equal
+    gap_angle = 4.0 if image_count <= 5 else (3.0 if image_count <= 12 else 2.0)
     step = 360.0 / max(1, image_count)
 
     def angle_in_segment(angle: float, start: float, end: float) -> bool:
@@ -578,7 +579,7 @@ def _circle_ring_collage_layout(settings: ProjectSettings, image_count: int) -> 
             'outer_radius': outer_r,
             'inner_radius': inner_r,
         }
-        cell.z_index = idx
+        cell.z_index = 0  # all segments same level — RGBA mask handles clipping
         cell.mask_seed = 6100 + idx * 19 + image_count * 101
         cells.append(cell)
 
@@ -670,7 +671,20 @@ def _film_strip_mix_layout(settings: ProjectSettings, image_count: int) -> Layou
 
 
 def _staircase_layout(settings: ProjectSettings, image_count: int) -> LayoutSuggestion:
-    """Diagonal staircase of larger anchors with adaptive fill around them."""
+    """Diagonal staircase: each step starts one band lower, extends to canvas bottom.
+
+    Layout model (3 steps, 5 images example):
+      ┌────┬────┬────┐
+      │ 1  │fill│fill│  ← band 0: step 0 tall, fill cells above steps 1+2
+      │    ├────┤    │
+      │    │ 2  │fill│  ← band 1
+      │    │    ├────┤
+      │    │    │ 3  │  ← band 2
+      └────┴────┴────┘
+
+    Steps never overlap because each step_y is the cumulative height of all
+    previous steps.  Fill areas are the rectangles above each step column.
+    """
     if image_count <= 3:
         return _mosaic_layout(settings, image_count)
 
@@ -680,31 +694,62 @@ def _staircase_layout(settings: ProjectSettings, image_count: int) -> LayoutSugg
     usable_w = float(width - 2 * margin)
     usable_h = float(height - 2 * margin)
 
-    step_count = min(3, image_count)
+    # Adapt step count to image count
+    step_count = 3
+    if image_count >= 8:
+        step_count = 4
+
+    # Equal-width columns, equal-height bands
     col_w = (usable_w - spacing * (step_count - 1)) / step_count
-    row_h = (usable_h - spacing * (step_count - 1)) / step_count
-    heights = [row_h * 1.30, row_h * 1.05, row_h * 0.80]
+    band_h = (usable_h - spacing * (step_count - 1)) / step_count
 
-    cells: List[CellRect] = []
+    # Build stair cells — no overlap: each step_y = cumulative previous band heights
+    stair_cells: List[CellRect] = []
+    y_tops: List[float] = []
     for idx in range(step_count):
-        h = min(usable_h - idx * (row_h + spacing), heights[idx])
-        y = float(margin) + idx * (row_h + spacing)
+        y_top = float(margin) + idx * (band_h + spacing)
+        step_h = usable_h + float(margin) - y_top   # extends to canvas bottom
         x = float(margin) + idx * (col_w + spacing)
-        cells.append(CellRect(x, y, col_w, h))
+        stair_cells.append(CellRect(x, y_top, col_w, step_h))
+        y_tops.append(y_top)
 
+    cells: List[CellRect] = list(stair_cells)
     remaining = image_count - step_count
+
     if remaining > 0:
-        fill_x = float(margin) + col_w + spacing
-        fill_y = float(margin) + heights[0] + spacing
-        fill_w = usable_w - (col_w + spacing)
-        fill_h = usable_h - (heights[0] + spacing)
-        if fill_w > 24 and fill_h > 24:
-            cells.extend(_make_grid_cells(remaining, fill_x, fill_y, fill_w, fill_h,
-                                          spacing, min(remaining, 3)))
+        # Fill areas: rectangles above each step (except step 0 which starts at top)
+        fill_regions: List[tuple] = []
+        for idx in range(1, step_count):
+            fx = float(margin) + idx * (col_w + spacing)
+            fy = float(margin)
+            fw = col_w
+            fh = y_tops[idx] - float(margin) - spacing
+            if fw >= 24 and fh >= 24:
+                fill_regions.append((fw * fh, fx, fy, fw, fh))
+
+        fill_regions.sort(key=lambda t: -t[0])   # largest first
+
+        if fill_regions:
+            # Distribute remaining images proportionally to fill-area size
+            total_area = sum(t[0] for t in fill_regions)
+            counts = [max(1, round(t[0] / total_area * remaining)) for t in fill_regions]
+            # Correct rounding drift
+            while sum(counts) > remaining:
+                counts[counts.index(max(counts))] -= 1
+            while sum(counts) < remaining:
+                counts[counts.index(min(counts))] += 1
+
+            for n, (_, fx, fy, fw, fh) in zip(counts, fill_regions):
+                if n > 0:
+                    n_cols_fill = max(1, min(n, round(fw / max(1.0, fh))))
+                    cells.extend(_make_grid_cells(n, fx, fy, fw, fh,
+                                                  spacing, n_cols_fill))
         else:
-            cells.extend(_make_grid_cells(remaining, margin, margin, usable_w, usable_h,
-                                          spacing, min(remaining, 3)))
+            # Fallback if no fill area is large enough
+            cells.extend(_make_grid_cells(remaining, margin, margin,
+                                          usable_w, usable_h, spacing, 3))
             cells = cells[:image_count]
+
     return LayoutSuggestion(name='Staircase', cells=_assign_images(cells, image_count))
 
 
