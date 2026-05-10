@@ -53,13 +53,14 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QProgressBar,
     QProgressDialog,
 )
 
 from app.i18n import tr, set_language, current_language, is_rtl
 from app.core import face_detector
 from app.core.collage_engine import generate_suggestions, custom_grid_layout
-from app.core.exporter import export_project, render_project
+from app.core.exporter import export_album, export_project, render_project
 from app.core.shape_layouts import generate_shaped_layout
 from app.core.smart_crop_service import (
     analysis_to_face_regions,
@@ -1076,6 +1077,16 @@ class MainWindow(QMainWindow):
         self._chscroll.hide()
         vlay.addWidget(self._chscroll)
 
+        # Album mode panel — page tab bar + settings bar (hidden until album mode activated)
+        from app.ui.album_panel import AlbumModePanel
+        self._album_panel = AlbumModePanel(frame)
+        self._album_panel.hide()
+        self._album_panel.generate_requested.connect(self._on_album_generate)
+        self._album_panel.cancel_requested.connect(self._on_album_cancel)
+        self._album_panel.page_selected.connect(self._on_album_page_selected)
+        self._album_panel.export_pdf_requested.connect(self._on_album_export_pdf)
+        vlay.addWidget(self._album_panel)
+
         # zoom bar
         zoom_bar = QWidget()
         zoom_bar.setFixedHeight(30)
@@ -1132,6 +1143,18 @@ class MainWindow(QMainWindow):
         self.depth_smart_crop_btn.setToolTip('שפר מיקום קרופ לפי ניתוח עומק תמונה')
         self._depth_worker: Optional[_DepthSmartCropWorker] = None
 
+        self._album_mode_btn = QPushButton('🎞  אלבום')
+        self._album_mode_btn.setFixedHeight(22)
+        self._album_mode_btn.setCheckable(True)
+        self._album_mode_btn.setStyleSheet(
+            _zbtn
+            + 'QPushButton{font-size:11px; padding:0 8px;}'
+            + 'QPushButton:checked{background:rgba(80,160,255,160); color:#fff;}'
+        )
+        self._album_mode_btn.setFocusPolicy(Qt.NoFocus)
+        self._album_mode_btn.setToolTip('פתח מצב בנאי האלבום')
+        self._album_worker: Optional[object] = None
+
         self._czoom_reset = QPushButton('1:1')
         self._czoom_reset.setFixedSize(32, 22)
         self._czoom_reset.setStyleSheet(_zbtn)
@@ -1142,6 +1165,7 @@ class MainWindow(QMainWindow):
         zlay.addWidget(self._czoom_sl, 1)
         zlay.addWidget(self.refresh_images_btn)
         zlay.addWidget(self.depth_smart_crop_btn)
+        zlay.addWidget(self._album_mode_btn)
         zlay.addWidget(self._czoom_in)
         zlay.addSpacing(6)
         zlay.addWidget(self._czoom_lbl)
@@ -1155,6 +1179,7 @@ class MainWindow(QMainWindow):
         self._czoom_reset.clicked.connect(self.canvas.fit_to_screen)
         self.refresh_images_btn.clicked.connect(self.refresh_images_from_disk)
         self.depth_smart_crop_btn.clicked.connect(self._run_depth_smart_crop)
+        self._album_mode_btn.toggled.connect(self._on_album_mode_toggled)
         self.canvas.displayZoomChanged.connect(self._on_canvas_zoom_changed)
         self.canvas.panChanged.connect(self._sync_canvas_scrollbars)
         self._chscroll.valueChanged.connect(self._on_canvas_hscroll)
@@ -4947,3 +4972,99 @@ class MainWindow(QMainWindow):
         from app.core.depth_service import release_depth_model
         release_depth_model()
         super().closeEvent(event)
+
+    # -------------------------------------------------------------------
+    # מצב אלבום — Album Builder mode
+    # -------------------------------------------------------------------
+
+    def _on_album_mode_toggled(self, active: bool) -> None:
+        self._album_panel.setVisible(active)
+        if active:
+            self._album_mode_btn.setText('🎞  ✕ אלבום')
+        else:
+            self._album_mode_btn.setText('🎞  אלבום')
+            # Restore normal single-page canvas view
+            self.canvas.project = self.project
+            self.canvas.refresh_preview()
+
+    def _on_album_generate(self, settings) -> None:
+        """User clicked 'צור אלבום' — start background worker."""
+        if not self.project or not self.project.images:
+            QMessageBox.warning(self, 'אלבום', 'יש לייבא תמונות תחילה.')
+            return
+
+        # Cancel any running worker
+        if self._album_worker and self._album_worker.isRunning():
+            self._album_worker.cancel()
+            self._album_worker.wait(2000)
+
+        from app.album_builder.workers import AlbumBuilderWorker
+        self._album_panel.set_generating(True)
+
+        worker = AlbumBuilderWorker(self.project, settings, self)
+        worker.stage.connect(self._on_album_stage)
+        worker.album_ready.connect(self._on_album_ready)
+        worker.failed.connect(self._on_album_failed)
+        worker.start()
+        self._album_worker = worker
+
+    def _on_album_stage(self, stage: str, current: int, total: int) -> None:
+        self._album_panel.update_progress(stage, current, total)
+
+    def _on_album_ready(self, album) -> None:
+        self.project.album_state = album
+        self._album_panel.set_album(album)
+        # Show first page on canvas
+        self._show_album_page(0)
+        self._push_history()
+
+    def _on_album_failed(self, msg: str) -> None:
+        self._album_panel.set_generating(False)
+        QMessageBox.critical(self, 'שגיאה בבניית האלבום', msg)
+
+    def _on_album_cancel(self) -> None:
+        if self._album_worker and self._album_worker.isRunning():
+            self._album_worker.cancel()
+        self._album_panel.set_generating(False)
+
+    def _on_album_page_selected(self, page_idx: int) -> None:
+        self._show_album_page(page_idx)
+
+    def _show_album_page(self, page_idx: int) -> None:
+        album = getattr(self.project, 'album_state', None)
+        if album is None or page_idx >= album.page_count:
+            return
+        from app.album_builder.builder import AlbumBuilder
+        builder = AlbumBuilder(self.project)
+        page_project = builder.get_page_project(album, page_idx)
+        album.current_page_index = page_idx
+        self.canvas.project = page_project
+        self.canvas.refresh_preview()
+
+    def _on_album_export_pdf(self) -> None:
+        album = getattr(self.project, 'album_state', None)
+        if album is None or not album.generated:
+            QMessageBox.warning(self, 'ייצוא PDF', 'יש ליצור אלבום תחילה.')
+            return
+
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'שמור PDF', 'album.pdf', 'PDF Files (*.pdf)'
+        )
+        if not path:
+            return
+
+        # Show progress in album panel
+        n = album.page_count
+
+        def _cb(cur, total):
+            self._album_panel.update_progress('מרנדר דפים לייצוא…', cur, total)
+
+        self._album_panel.set_generating(True)
+        try:
+            export_album(self.project, path, progress_cb=_cb)
+            self._album_panel.set_generating(False)
+            QMessageBox.information(self, 'ייצוא הסתיים', f'האלבום נשמר:\n{path}')
+        except Exception as exc:
+            self._album_panel.set_generating(False)
+            QMessageBox.critical(self, 'שגיאה בייצוא', str(exc))

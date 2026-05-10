@@ -299,3 +299,60 @@ def export_project(project: ProjectState, output_path: str) -> str:
 
     image.save(out, **save_kwargs)
     return str(out)
+
+
+def export_album(
+    project: ProjectState,
+    output_path: str,
+    progress_cb=None,       # Optional[Callable[[int, int], None]]
+) -> str:
+    """Render every album page and save as a multi-page PDF (or numbered PNGs/JPEGs).
+
+    Uses Pillow's built-in multi-page PDF support (save_all=True) —
+    no extra dependencies required.
+
+    progress_cb(current_page, total_pages) is called after each page renders.
+    """
+    album = getattr(project, 'album_state', None)
+    if album is None or not album.pages:
+        # Fall back to single-page export
+        return export_project(project, output_path)
+
+    from app.album_builder.builder import AlbumBuilder
+
+    builder = AlbumBuilder(project)
+    settings = project.settings
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    suffix = out.suffix.lower()
+    n_pages = album.page_count
+
+    page_images = []
+    for idx in range(n_pages):
+        if progress_cb:
+            progress_cb(idx + 1, n_pages)
+        page_project = builder.get_page_project(album, idx)
+        img = render_project(page_project, include_bleed=settings.bleed_mm > 0)
+        page_images.append(img.convert('RGB'))
+
+    if suffix == '.pdf':
+        page_images[0].save(
+            out,
+            save_all=True,
+            append_images=page_images[1:],
+            resolution=settings.dpi,
+        )
+    elif suffix in {'.jpg', '.jpeg'}:
+        # Save numbered files: album_p01.jpg, album_p02.jpg ...
+        stem = out.stem
+        for i, img in enumerate(page_images):
+            p = out.parent / f'{stem}_p{i + 1:02d}.jpg'
+            img.save(p, quality=95, subsampling=0, dpi=(settings.dpi, settings.dpi))
+    else:
+        # PNG sequence
+        stem = out.stem
+        for i, img in enumerate(page_images):
+            p = out.parent / f'{stem}_p{i + 1:02d}.png'
+            img.save(p, dpi=(settings.dpi, settings.dpi))
+
+    return str(out)

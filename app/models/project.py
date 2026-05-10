@@ -280,3 +280,5 @@ class ProjectState:
     # Committed overlays (shown permanently on canvas)
     text_overlays: List[TextOverlay] = field(default_factory=list)
     elements: List[ElementOverlay] = field(default_factory=list)
+    # Album Builder state — None when album mode is not active
+    album_state: Optional[Any] = field(default=None, repr=False)  # AlbumState
