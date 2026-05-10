@@ -1032,15 +1032,27 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        from PySide6.QtWidgets import QStackedWidget as _SW
+        from app.ui.album_wizard import AlbumWizard
+
+        self._central_stack = _SW()
+        self.setCentralWidget(self._central_stack)
+
+        # Index 0 — normal collage mode
+        collage_widget = QWidget()
+        root = QHBoxLayout(collage_widget)
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
         root.addWidget(self._build_left_panel())
         self.canvas = CollageCanvas()
         root.addWidget(self._build_canvas_frame(), 1)
         root.addWidget(self._build_right_panel())
+        self._central_stack.addWidget(collage_widget)   # index 0
+
+        # Index 1 — album wizard (self-contained, no shared state)
+        self._album_wizard = AlbumWizard()
+        self._album_wizard.exit_requested.connect(self._on_exit_album_wizard)
+        self._central_stack.addWidget(self._album_wizard)  # index 1
 
         # Panels are created inside _build_right_panel (sidebar stack)
 
@@ -1076,16 +1088,6 @@ class MainWindow(QMainWindow):
         self._chscroll.setFixedHeight(14)
         self._chscroll.hide()
         vlay.addWidget(self._chscroll)
-
-        # Album mode panel — page tab bar + settings bar (hidden until album mode activated)
-        from app.ui.album_panel import AlbumModePanel
-        self._album_panel = AlbumModePanel(frame)
-        self._album_panel.hide()
-        self._album_panel.generate_requested.connect(self._on_album_generate)
-        self._album_panel.cancel_requested.connect(self._on_album_cancel)
-        self._album_panel.page_selected.connect(self._on_album_page_selected)
-        self._album_panel.export_pdf_requested.connect(self._on_album_export_pdf)
-        vlay.addWidget(self._album_panel)
 
         # zoom bar
         zoom_bar = QWidget()
@@ -1153,7 +1155,6 @@ class MainWindow(QMainWindow):
         )
         self._album_mode_btn.setFocusPolicy(Qt.NoFocus)
         self._album_mode_btn.setToolTip('פתח מצב בנאי האלבום')
-        self._album_worker: Optional[object] = None
 
         self._czoom_reset = QPushButton('1:1')
         self._czoom_reset.setFixedSize(32, 22)
@@ -4978,93 +4979,16 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------
 
     def _on_album_mode_toggled(self, active: bool) -> None:
-        self._album_panel.setVisible(active)
         if active:
+            self._central_stack.setCurrentIndex(1)
             self._album_mode_btn.setText('🎞  ✕ אלבום')
         else:
+            self._central_stack.setCurrentIndex(0)
             self._album_mode_btn.setText('🎞  אלבום')
-            # Restore normal single-page canvas view
-            self.canvas.project = self.project
-            self.canvas.refresh_preview()
 
-    def _on_album_generate(self, settings) -> None:
-        """User clicked 'צור אלבום' — start background worker."""
-        if not self.project or not self.project.images:
-            QMessageBox.warning(self, 'אלבום', 'יש לייבא תמונות תחילה.')
-            return
+    def _on_exit_album_wizard(self) -> None:
+        """Called when the user clicks 'חזור לקולאז'' inside the wizard."""
+        self._album_mode_btn.setChecked(False)
+        self._central_stack.setCurrentIndex(0)
 
-        # Cancel any running worker
-        if self._album_worker and self._album_worker.isRunning():
-            self._album_worker.cancel()
-            self._album_worker.wait(2000)
-
-        from app.album_builder.workers import AlbumBuilderWorker
-        self._album_panel.set_generating(True)
-
-        worker = AlbumBuilderWorker(self.project, settings, self)
-        worker.stage.connect(self._on_album_stage)
-        worker.album_ready.connect(self._on_album_ready)
-        worker.failed.connect(self._on_album_failed)
-        worker.start()
-        self._album_worker = worker
-
-    def _on_album_stage(self, stage: str, current: int, total: int) -> None:
-        self._album_panel.update_progress(stage, current, total)
-
-    def _on_album_ready(self, album) -> None:
-        self.project.album_state = album
-        self._album_panel.set_album(album)
-        # Show first page on canvas
-        self._show_album_page(0)
-        self._push_history()
-
-    def _on_album_failed(self, msg: str) -> None:
-        self._album_panel.set_generating(False)
-        QMessageBox.critical(self, 'שגיאה בבניית האלבום', msg)
-
-    def _on_album_cancel(self) -> None:
-        if self._album_worker and self._album_worker.isRunning():
-            self._album_worker.cancel()
-        self._album_panel.set_generating(False)
-
-    def _on_album_page_selected(self, page_idx: int) -> None:
-        self._show_album_page(page_idx)
-
-    def _show_album_page(self, page_idx: int) -> None:
-        album = getattr(self.project, 'album_state', None)
-        if album is None or page_idx >= album.page_count:
-            return
-        from app.album_builder.builder import AlbumBuilder
-        builder = AlbumBuilder(self.project)
-        page_project = builder.get_page_project(album, page_idx)
-        album.current_page_index = page_idx
-        self.canvas.project = page_project
-        self.canvas.refresh_preview()
-
-    def _on_album_export_pdf(self) -> None:
-        album = getattr(self.project, 'album_state', None)
-        if album is None or not album.generated:
-            QMessageBox.warning(self, 'ייצוא PDF', 'יש ליצור אלבום תחילה.')
-            return
-
-        from PySide6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getSaveFileName(
-            self, 'שמור PDF', 'album.pdf', 'PDF Files (*.pdf)'
-        )
-        if not path:
-            return
-
-        # Show progress in album panel
-        n = album.page_count
-
-        def _cb(cur, total):
-            self._album_panel.update_progress('מרנדר דפים לייצוא…', cur, total)
-
-        self._album_panel.set_generating(True)
-        try:
-            export_album(self.project, path, progress_cb=_cb)
-            self._album_panel.set_generating(False)
-            QMessageBox.information(self, 'ייצוא הסתיים', f'האלבום נשמר:\n{path}')
-        except Exception as exc:
-            self._album_panel.set_generating(False)
-            QMessageBox.critical(self, 'שגיאה בייצוא', str(exc))
+    # Album mode handlers moved to AlbumWizard widget (app/ui/album_wizard.py)
