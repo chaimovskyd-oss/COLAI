@@ -1,28 +1,38 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+**/__pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
+.Python
+.python-version
+__pypackages__/
 
 # Virtual environments
 .venv/
 venv/
 env/
 ENV/
+env.bak/
+venv.bak/
 
 # Build folders
 dist/
 build/
 out/
-*.toc
+pip-wheel-metadata/
+*.egg-info/
+*.egg
+*.whl
 *.pyz
+*.toc
 
 # Node
 node_modules/
@@ -36,43 +46,43 @@ node_modules/
 *.orig
 *.stackdump
 .smart_collage_elements_cache/
+*.cache
 
-# IDE
+# IDE / editor
 .vscode/
 .idea/
-*.swp
+*.sublime*
+*.sw?
 *.swo
 *~
+*.iml
+.project
+.metadata
+.settings/
 
 # OS
 .DS_Store
 Thumbs.db
 desktop.ini
+Icon?
+ehthumbs.db
+$RECYCLE.BIN/
+*.lnk
 
 # Local environment / secrets
 .env
 .env.*
 !.env.example
 *.local
+secrets.*
+credentials.*
 
-# Large / binary artifacts
-*.zip
-*.7z
-*.rar
-*.exe
-*.msi
-*.pkg
-*.pt
-*.pth
-*.bin
-*.ckpt
-*.safetensors
-
-# Runtime-generated user output
+# Generated runtime artifacts
 edited_images/
 exports/
 output/
 *.colproj.autosave
+*.autosave
 
 # Heavy downloaded/external model trees
 image.editor.engine/darktable-5.4.1/
@@ -81,6 +91,11 @@ image.editor.engine/smart_image_editor/models/animegan2.onnx/
 image.editor.engine/smart_image_editor/models/1animegan.onnx
 image.editor.engine/smart_image_editor/models/animegan.onnx
 image.editor.engine/.pytest_cache/
+image.editor.engine/gfpgan/
+image.editor.engine/smart_image_editor/models/*.onnx
+image.editor.engine/smart_image_editor/models/*.pt
+image.editor.engine/smart_image_editor/models/*.safetensors
+image.editor.engine/smart_image_editor/models/*.bin
 
 # Keep project/build configuration in Git
 !*.spec
