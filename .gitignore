@@ -94,6 +94,7 @@ image.editor.engine/.pytest_cache/
 image.editor.engine/gfpgan/
 image.editor.engine/smart_image_editor/models/*.onnx
 image.editor.engine/smart_image_editor/models/*.pt
+image.editor.engine/smart_image_editor/models/*.pth
 image.editor.engine/smart_image_editor/models/*.safetensors
 image.editor.engine/smart_image_editor/models/*.bin
 
